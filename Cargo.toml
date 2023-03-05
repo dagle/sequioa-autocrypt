@@ -8,4 +8,6 @@ authors = ["Per Odlund <odlund@posteo.net>"]
 
 [dependencies]
 anyhow = "1.0.69"
+chrono = "0.4.23"
+rusqlite = { version = "0.28.0", features = ["chrono"] }
 sequoia-openpgp = "1.13.0"
