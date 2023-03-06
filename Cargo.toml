@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Per Odlund <odlund@posteo.net>"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 anyhow = "1.0.69"
 chrono = "0.4.23"
+idna = "0.3.0"
 rusqlite = { version = "0.28.0", features = ["chrono"] }
 sequoia-openpgp = "1.13.0"
