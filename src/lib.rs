@@ -11,7 +11,7 @@ pub mod store;
 pub type Result<T> = sequoia_openpgp::Result<T>;
 
 pub fn canonicalize(email: &str) -> Option<String> {
-    let at = email.find("@")?;
+    let at = email.find('@')?;
     let username = &email[..at];
     let lower = username.to_lowercase();
     let domain = &email[at+1..];

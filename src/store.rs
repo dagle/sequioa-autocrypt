@@ -12,13 +12,13 @@ use crate::sq::{DHelper, VHelper};
 // TODO:
 // [x] Run tests!
 // [ ] Return stuff from verify/decrypt
-// [x] Feature: a canonicalized_email function (create a feature)
+// [x] Feature: a canonicalized_email function
 // [ ] Feature: Account settings
 // [x] Clean up, move to multiple files
 // [ ] Change new to take a path and not a directory or a engine 
 // [ ] Support a generic db engine (https://github.com/tokio-rs/rdbc)
 
-static DBNAME: &'static str = "autocrypt.db";
+static DBNAME: &str = "autocrypt.db";
 
 /// UIRecommendation represent whether or not we should encrypt an email.
 /// Disable means that we shouldn't try to encrypt because it's likely people
@@ -38,13 +38,9 @@ pub enum UIRecommendation {
 pub struct Account {
     pub mail: String,
     pub cert: Cert,
-    // TODO: put enable into flag
-    // pub enable: bool,
 }
 
 pub fn setup(con: &Connection) -> Result<()> {
-    // TODO: put enable into flag
-            // enable int;
     let accountschema =
         "CREATE TABLE account (
             address text primary key not null, 
@@ -73,7 +69,7 @@ macro_rules! can_export {
     ($select:expr, $policy:expr) => {
         $select.keys().with_policy($policy, None)
             .supported().alive().revoked(false).for_transport_encryption()
-            .nth(0).is_some()
+            .next().is_some()
     }
 }
 
@@ -127,12 +123,10 @@ impl<'a> AutocryptStore<'a> {
             let mail: String = row.get(0)?;
             let keystr: String = row.get(1)?;
             let key: Cert = CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok()).ok_or(anyhow::anyhow!("No valid key found for account"))?;
-            // let enable: bool = row.get(2);
 
             return Ok(Account {
                 mail,
                 cert: key,
-                // enable,
             })
         }
         return Err(anyhow::anyhow!("No Account found"));
@@ -147,8 +141,7 @@ impl<'a> AutocryptStore<'a> {
                     anyhow::anyhow!(
                         "Couldn't parse timestamp")
                 )?;
-                let dt = DateTime::<Utc>::from_utc(nt, Utc);
-                dt
+                DateTime::<Utc>::from_utc(nt, Utc)
             };
 
             let timestamp = get_time!(row.get(2));
@@ -250,7 +243,7 @@ impl<'a> AutocryptStore<'a> {
         builder.generate()
     }
 
-    pub fn update_private_key(&self, policy: &dyn Policy ,canonicalized_mail: &str) -> openpgp::Result<()> {
+    pub fn update_private_key(&self, policy: &dyn Policy, canonicalized_mail: &str) -> openpgp::Result<()> {
         let now = SystemTime::now();
 
         // Check if we have a key, if that is the case, check if the key is ok.
@@ -281,13 +274,10 @@ impl<'a> AutocryptStore<'a> {
     pub fn update_last_seen(&self, canonicalized_mail: &str, now: &DateTime<Utc>) -> openpgp::Result<()> {
         // We don't allow updating into the future
         // Unless we are doing testing
-        if !cfg!(test) {
-            if now.cmp(&Utc::now()) == Ordering::Greater {
-                // Error?
-                return Err(anyhow::anyhow!(
-                        "Date is in the future"
-                        ))
-            }
+        if !cfg!(test) && now.cmp(&Utc::now()) == Ordering::Greater {
+            return Err(anyhow::anyhow!(
+                    "Date is in the future"
+            ))
         }
         let seenstmt = 
             "UPDATE peer
@@ -301,7 +291,7 @@ impl<'a> AutocryptStore<'a> {
         Ok(())
     }
 
-    // let armored = String::from_utf8(cert.armored().to_vec()?)?;
+    #[allow(clippy::too_many_arguments)]
     fn insert_peer(&self, mail: &str, last_seen: DateTime<Utc>,
         timestamp: Option<DateTime<Utc>>, cert: Option<&Cert>, 
         gossip_timestamp: Option<DateTime<Utc>>, gossip_cert: Option<&Cert>
@@ -310,9 +300,6 @@ impl<'a> AutocryptStore<'a> {
         let keystr = if let Some(key) = cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None };
-        // let keystr = if let Some(key) = cert {
-        //     String::from_utf8(key.armored().to_vec()?)?
-        // } else { String::new()};
         let keystr_fpr = cert.as_ref().map(|c| c.fingerprint().to_hex());
 
         let gossip_keystr = if let Some(key) = gossip_cert {
@@ -373,14 +360,12 @@ impl<'a> AutocryptStore<'a> {
                                 peer.gossip_cert.as_ref(), prefer)?;
                             return Ok(true)
                     }
-                } else {
-                    if peer.gossip_timestamp.is_none() ||
+                } else if peer.gossip_timestamp.is_none() ||
                         effective_date.cmp(&peer.gossip_timestamp.unwrap()) == Ordering::Greater {
                             self.insert_peer(canonicalized_mail, effective_date, 
                                 peer.timestamp, peer.cert.as_ref(), Some(effective_date), 
                                 Some(key), prefer)?;
                             return Ok(true)
-                    }
                 }
                 self.update_last_seen(canonicalized_mail, &effective_date)?;
 
@@ -481,7 +466,7 @@ impl<'a> AutocryptStore<'a> {
 
         let signing_key = account.cert.keys().secret()
             .with_policy(policy, None).supported().alive().revoked(false).for_signing()
-            .nth(0).ok_or_else(||
+            .next().ok_or_else(||
                 anyhow::anyhow!(
                     "No key for signing found")
                 )?

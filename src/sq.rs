@@ -64,8 +64,8 @@ impl<'a> VerificationHelper for VHelper<'a> {
             match id {
                 openpgp::KeyHandle::Fingerprint(fpr) => {
                     if let Ok(peer) = self.ctx.get_peer_fpr(fpr) {
-                        peer.cert.map(|c| certs.push(c));
-                        peer.gossip_cert.map(|c| certs.push(c));
+                        if let Some(c) = peer.cert { certs.push(c) }
+                        if let Some(c) = peer.gossip_cert { certs.push(c) }
                     }
                 }
                 // TODO: Handle this
@@ -151,7 +151,7 @@ impl<'a> VerificationHelper for DHelper<'a> {
     fn get_certs(&mut self, ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
         // TODO: Being able to turn off verification
 
-        return self.helper.get_certs(ids)
+        self.helper.get_certs(ids)
     }
     fn check(&mut self, _structure: MessageStructure) -> Result<()> {
         // TODO: Save the result
