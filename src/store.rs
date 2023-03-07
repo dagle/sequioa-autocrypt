@@ -5,16 +5,14 @@ use anyhow::Context;
 use chrono::{Utc, DateTime, NaiveDateTime, Duration};
 use openpgp::{Cert, cert::{CertParser, CertBuilder, CipherSuite, amalgamation::ValidateAmalgamation}, Fingerprint, packet::Signature, types::{KeyFlags, CompressionAlgorithm}, crypto::{Password, self}, policy::Policy, serialize::{stream::{self, Recipient, Armorer, Encryptor, Compressor, LiteralWriter, Signer}, SerializeInto, Marshal}, parse::{stream::{DecryptorBuilder, DetachedVerifierBuilder, VerifierBuilder}, Parse}};
 use rusqlite::{Connection, params, Rows};
+use sequoia_autocrypt::{AutocryptHeader, AutocryptHeaderType, AutocryptSetupMessage, AutocryptSetupMessageParser};
 use crate::{Result, peer::Peer, sq::SessionKey};
 use openpgp::packet::prelude::SecretKeyMaterial::{Unencrypted, Encrypted};
 use crate::sq::{DHelper, VHelper};
 
 // TODO:
-// [x] Run tests!
 // [ ] Return stuff from verify/decrypt
-// [x] Feature: a canonicalized_email function
 // [ ] Feature: Account settings
-// [x] Clean up, move to multiple files
 // [ ] Change new to take a path and not a directory or a engine 
 // [ ] Support a generic db engine (https://github.com/tokio-rs/rdbc)
 
@@ -65,14 +63,6 @@ pub fn setup(con: &Connection) -> Result<()> {
 }
 
 // if we find one key for encryption, return true
-macro_rules! can_export {
-    ($select:expr, $policy:expr) => {
-        $select.keys().with_policy($policy, None)
-            .supported().alive().revoked(false).for_transport_encryption()
-            .next().is_some()
-    }
-}
-
 macro_rules! get_time {
     ($field:expr) => {
         {
@@ -92,22 +82,21 @@ macro_rules! get_time {
     }
 }
 
-pub struct AutocryptStore<'a> {
-    pub password: &'a str,
+pub struct AutocryptStore {
+    pub password: Password,
     pub con: Connection,
-    // con: Arc<dyn rdbc::Driver>,
 }
 
-impl<'a> AutocryptStore<'a> {
-    pub fn new(path: &'a str, password: &'a str) -> openpgp::Result<Self> {
+impl AutocryptStore {
+    pub fn new(path: &str, password: &str) -> Result<Self> {
         let mut dbpath = PathBuf::new();
         dbpath.push(path);
         dbpath.push(DBNAME);
         let con = Connection::open(dbpath)?;
-        Ok(AutocryptStore { password, con })
+        Ok(AutocryptStore { password: Password::from(password), con })
     }
 
-    pub fn get_account(&self, canonicalized_mail: &str) -> openpgp::Result<Account> {
+    pub fn get_account(&self, canonicalized_mail: &str) -> Result<Account> {
         let mut selectstmt = self.con.prepare(
             "SELECT
             address, 
@@ -174,7 +163,7 @@ impl<'a> AutocryptStore<'a> {
         return Err(anyhow::anyhow!("No Peer found"));
     }
 
-    pub fn get_peer(&self, canonicalized_mail: &str) -> openpgp::Result<Peer> {
+    pub fn get_peer(&self, canonicalized_mail: &str) -> Result<Peer> {
         let mut selectstmt = self.con.prepare(
             "SELECT
             address, 
@@ -193,7 +182,7 @@ impl<'a> AutocryptStore<'a> {
         Self::row_to_peer(&mut rows)
     }
 
-    pub fn get_peer_fpr(&self, fpr: &Fingerprint) -> openpgp::Result<Peer> {
+    pub fn get_peer_fpr(&self, fpr: &Fingerprint) -> Result<Peer> {
         let mut selectstmt = self.con.prepare(
             "SELECT
             address, 
@@ -238,22 +227,12 @@ impl<'a> AutocryptStore<'a> {
         );
 
         // (password should be optional)
-        builder = builder.set_password(Some(Password::from(self.password)));
+        builder = builder.set_password(Some(self.password.clone()));
 
         builder.generate()
     }
 
-    pub fn update_private_key(&self, policy: &dyn Policy, canonicalized_mail: &str) -> openpgp::Result<()> {
-        let now = SystemTime::now();
-
-        // Check if we have a key, if that is the case, check if the key is ok.
-        if let Ok(account) = self.get_account(canonicalized_mail) {
-            if account.cert.primary_key().with_policy(policy, now).is_ok() {
-                return Ok(())
-            }
-        }
-        let (cert, _) = self.gen_cert(canonicalized_mail, now)?;
-
+    fn install_account(&self, canonicalized_mail: &str, cert: &Cert) -> Result<()> {
         let output = &mut Vec::new();
         cert.as_tsk().armored().serialize(output)?;
         let certstr = std::str::from_utf8(output)?;
@@ -267,11 +246,24 @@ impl<'a> AutocryptStore<'a> {
             &canonicalized_mail, 
             &certstr,
         ])?;
-        
         Ok(())
     }
 
-    pub fn update_last_seen(&self, canonicalized_mail: &str, now: &DateTime<Utc>) -> openpgp::Result<()> {
+    pub fn update_private_key(&self, policy: &dyn Policy, canonicalized_mail: &str) -> Result<()> {
+        let now = SystemTime::now();
+
+        // Check if we have a key, if that is the case, check if the key is ok.
+        if let Ok(account) = self.get_account(canonicalized_mail) {
+            if account.cert.primary_key().with_policy(policy, now).is_ok() {
+                return Ok(())
+            }
+        }
+        let (cert, _) = self.gen_cert(canonicalized_mail, now)?;
+
+        self.install_account(canonicalized_mail, &cert)
+    }
+
+    pub fn update_last_seen(&self, canonicalized_mail: &str, now: &DateTime<Utc>) -> Result<()> {
         // We don't allow updating into the future
         // Unless we are doing testing
         if !cfg!(test) && now.cmp(&Utc::now()) == Ordering::Greater {
@@ -295,7 +287,7 @@ impl<'a> AutocryptStore<'a> {
     fn insert_peer(&self, mail: &str, last_seen: DateTime<Utc>,
         timestamp: Option<DateTime<Utc>>, cert: Option<&Cert>, 
         gossip_timestamp: Option<DateTime<Utc>>, gossip_cert: Option<&Cert>
-        , prefer: bool) -> openpgp::Result<()>{
+        , prefer: bool) -> Result<()>{
 
         let keystr = if let Some(key) = cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
@@ -335,7 +327,7 @@ impl<'a> AutocryptStore<'a> {
 
     // This function is ugly
     pub fn update_peer(&self, canonicalized_mail: &str, key: &Cert, 
-        prefer: bool, effective_date: DateTime<Utc>, gossip: bool) -> openpgp::Result<bool> {
+        prefer: bool, effective_date: DateTime<Utc>, gossip: bool) -> Result<bool> {
         match self.get_peer(canonicalized_mail) {
             Err(_) => {
                 if gossip {
@@ -391,7 +383,7 @@ impl<'a> AutocryptStore<'a> {
         UIRecommendation::Disable
     }
 
-    pub fn header(&self, canonicalized_email: &str, policy: &dyn Policy, prefer: bool) -> Result<String> {
+    pub fn header(&self, canonicalized_email: &str, policy: &dyn Policy, prefer: bool) -> Result<AutocryptHeader> {
         let account = self.get_account(canonicalized_email)?;
 
         let preferstr = if prefer {
@@ -400,38 +392,41 @@ impl<'a> AutocryptStore<'a> {
             "nopreference"
         };
 
-        if can_export!(account.cert, policy) {
-            let keystr = String::from_utf8(account.cert.armored().to_vec()?)?;
-            Ok(format!("addr={}; prefer-encrypt={}; keydata={}",
-                    canonicalized_email, preferstr, keystr))
-        } else {
-            Err(anyhow::anyhow!(
-                    "Key not found"))
-        }
+        AutocryptHeader::new_sender(policy, &account.cert, canonicalized_email, preferstr)
     }
 
 
-    pub fn gossip_header(&self, canonicalized_email: &str, policy: &dyn Policy) -> Result<String> {
+    pub fn gossip_header(&self, canonicalized_email: &str, policy: &dyn Policy) -> Result<AutocryptHeader> {
         let peer = self.get_peer(canonicalized_email)?;
 
         if let Some(ref cert) = peer.cert {
-            if can_export!(cert, policy) {
-
-                let keystr = String::from_utf8(cert.armored().to_vec()?)?;
-                return Ok(format!("addr={}; keydata={}",
-                        canonicalized_email, keystr))
+            if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, canonicalized_email, None) {
+                header.header_type = AutocryptHeaderType::Gossip;
+                return Ok(header)
             }
         }
         if let Some(ref cert) = peer.gossip_cert {
-            if can_export!(cert, policy) {
-
-                let keystr = String::from_utf8(cert.armored().to_vec()?)?;
-                return Ok(format!("addr={}; keydata={}",
-                        canonicalized_email, keystr))
+            if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, canonicalized_email, None) {
+                header.header_type = AutocryptHeaderType::Gossip;
+                return Ok(header)
             }
         }
         Err(anyhow::anyhow!(
                 "Key not found"))
+    }
+
+    pub fn setup_message(&self, canonicalized_email: &str) -> Result<AutocryptSetupMessage> {
+        let account = self.get_account(canonicalized_email)?;
+        Ok(AutocryptSetupMessage::new(account.cert))
+    }
+
+    pub fn install_message<'a>(&self, canonicalized_email: &str, mut message: AutocryptSetupMessageParser<'a>, password: &Password) -> Result<()> {
+        message.decrypt(password)?;
+        let decrypted = message.parse()?;
+        let cert = decrypted.into_cert();
+
+        self.install_account(&canonicalized_email, &cert)?;
+        Ok(())
     }
 
     // recipients needs to be a list of canonicalized emails
@@ -481,7 +476,7 @@ impl<'a> AutocryptStore<'a> {
                 signing_key.into_keypair()
             }
             Encrypted(ref e) => {
-                let res = e.decrypt(signing_key.pk_algo(), &Password::from(self.password))?;
+                let res = e.decrypt(signing_key.pk_algo(), &self.password)?;
                 crypto::KeyPair::new(signing_key.into(), res)
             }
         }?;
@@ -520,7 +515,7 @@ impl<'a> AutocryptStore<'a> {
     }
 
     pub fn verify(&self, policy: &dyn Policy, input: &mut (dyn io::Read + Send + Sync),
-    sigstream: Option<&mut (dyn io::Read + Send + Sync)>, output: Option<&mut (dyn io::Write + Send + Sync)>) -> openpgp::Result<()> {
+    sigstream: Option<&mut (dyn io::Read + Send + Sync)>, output: Option<&mut (dyn io::Write + Send + Sync)>) -> Result<()> {
 
         let helper = VHelper::new(self);
         let _helper = if let Some(dsig) = sigstream {
@@ -554,11 +549,9 @@ mod tests {
     use sequoia_openpgp::policy::StandardPolicy;
     use rusqlite::Connection;
 
-
     static OUR: &'static str = "art.vandelay@vandelayindustries.com";
     static PEER1: &'static str = "regina.phalange@friends.com";
     static PEER2: &'static str = "ken.adams@friends.com";
-    // static PEER3: &'static str = "buffy.summers@slaythatvampire.com";
 
     #[derive(PartialEq)]
     enum Mode {
@@ -567,14 +560,14 @@ mod tests {
         _Both, // If we want both seen and gossip (todo)
     }
 
-    fn test_db() -> AutocryptStore<'static> {
+    fn test_db() -> AutocryptStore {
         let con = Connection::open_in_memory().unwrap();
         // let con = Connection::open("test.db").unwrap();
         setup(&con).unwrap();
-        AutocryptStore { password: "hunter2", con }
+        AutocryptStore { password: Password::from("hunter2"), con }
     }
 
-    fn insert_peer(ctx: &AutocryptStore, peer: &Peer) -> openpgp::Result<()>{
+    fn insert_peer(ctx: &AutocryptStore, peer: &Peer) -> Result<()>{
         ctx.insert_peer(&peer.mail, peer.last_seen, peer.timestamp,
             peer.cert.as_ref(), peer.gossip_timestamp,
             peer.gossip_cert.as_ref(), peer.prefer)
@@ -582,7 +575,7 @@ mod tests {
     }
 
     fn gen_peer(ctx: &AutocryptStore, canonicalized_mail: &str, mode: Mode, prefer: bool) 
-        -> openpgp::Result<()> {
+        -> Result<()> {
         let now = SystemTime::now();
 
         let mut builder = CertBuilder::new();

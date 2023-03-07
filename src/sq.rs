@@ -43,11 +43,11 @@ impl std::str::FromStr for SessionKey {
 }
 
 pub struct VHelper<'a> {
-    ctx: &'a AutocryptStore<'a>,
+    ctx: &'a AutocryptStore,
 }
 
 impl<'a> VHelper<'a> {
-    pub fn new(ctx: &'a AutocryptStore<'a>)
+    pub fn new(ctx: &'a AutocryptStore)
            -> Self {
         VHelper {
             ctx,
@@ -115,7 +115,7 @@ impl PrivateKey {
 }
 
 pub struct DHelper<'a> {
-    ctx: &'a AutocryptStore<'a>,
+    ctx: &'a AutocryptStore,
     sk: Option<SessionKey>,
     keys: HashMap<KeyID, PrivateKey>,
     fp: Fingerprint,
@@ -249,7 +249,7 @@ impl<'a> DecryptionHelper for DHelper<'a> {
                 if key.get_unlock().is_some() {
                     continue;
                 }
-                if let Ok(decryptor) = key.unlock(&Password::from(self.ctx.password)) {
+                if let Ok(decryptor) = key.unlock(&self.ctx.password) {
                     let algo = key.pk_algo();
                     if self.try_decrypt(pkesk, sym_algo, algo, decryptor,
                             &mut decrypt)
