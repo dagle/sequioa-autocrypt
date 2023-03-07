@@ -95,11 +95,14 @@ impl PrivateKey {
         self.key.pk_algo()
     }
 
-    fn unlock(&mut self, p: &Password) -> openpgp::Result<Box<dyn Decryptor>> {
-        let algo = self.key.pk_algo();
-        self.key.secret_mut().decrypt_in_place(algo, p)?;
-        let keypair = self.key.clone().into_keypair()?;
-        Ok(Box::new(keypair))
+    fn unlock(&mut self, p: &Option<Password>) -> Result<Box<dyn Decryptor>> {
+        if let Some(p) = p {
+            let algo = self.key.pk_algo();
+            self.key.secret_mut().decrypt_in_place(algo, p)?;
+            let keypair = self.key.clone().into_keypair()?;
+            return Ok(Box::new(keypair))
+        }
+        Err(anyhow::anyhow!("Key is encrypted but no password supplied"))
     }
 
     fn get_unlock(&self) -> Option<Box<dyn Decryptor>> {

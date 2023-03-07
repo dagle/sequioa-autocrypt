@@ -14,7 +14,7 @@ use crate::sq::{DHelper, VHelper};
 // [ ] Return stuff from verify/decrypt
 // [ ] Feature: Account settings
 // [ ] Change new to take a path and not a directory or a engine 
-// [ ] Support a generic db engine (https://github.com/tokio-rs/rdbc)
+// [ ] Support a generic db engine (sqlx)
 
 static DBNAME: &str = "autocrypt.db";
 
@@ -83,17 +83,17 @@ macro_rules! get_time {
 }
 
 pub struct AutocryptStore {
-    pub password: Password,
+    pub password: Option<Password>,
     pub con: Connection,
 }
 
 impl AutocryptStore {
-    pub fn new(path: &str, password: &str) -> Result<Self> {
+    pub fn new(path: &str, password: Option<&str>) -> Result<Self> {
         let mut dbpath = PathBuf::new();
         dbpath.push(path);
         dbpath.push(DBNAME);
         let con = Connection::open(dbpath)?;
-        Ok(AutocryptStore { password: Password::from(password), con })
+        Ok(AutocryptStore { password: password.map(Password::from), con })
     }
 
     pub fn get_account(&self, canonicalized_mail: &str) -> Result<Account> {
@@ -226,8 +226,7 @@ impl AutocryptStore {
             None,
         );
 
-        // (password should be optional)
-        builder = builder.set_password(Some(self.password.clone()));
+        builder = builder.set_password(self.password.clone());
 
         builder.generate()
     }
@@ -420,12 +419,13 @@ impl AutocryptStore {
         Ok(AutocryptSetupMessage::new(account.cert))
     }
 
-    pub fn install_message<'a>(&self, canonicalized_email: &str, mut message: AutocryptSetupMessageParser<'a>, password: &Password) -> Result<()> {
+    pub fn install_message(&self, canonicalized_email: &str, 
+        mut message: AutocryptSetupMessageParser, password: &Password) -> Result<()> {
         message.decrypt(password)?;
         let decrypted = message.parse()?;
         let cert = decrypted.into_cert();
 
-        self.install_account(&canonicalized_email, &cert)?;
+        self.install_account(canonicalized_email, &cert)?;
         Ok(())
     }
 
@@ -476,8 +476,12 @@ impl AutocryptStore {
                 signing_key.into_keypair()
             }
             Encrypted(ref e) => {
-                let res = e.decrypt(signing_key.pk_algo(), &self.password)?;
-                crypto::KeyPair::new(signing_key.into(), res)
+                if let Some(ref password) = self.password {
+                    let res = e.decrypt(signing_key.pk_algo(), password)?;
+                    crypto::KeyPair::new(signing_key.into(), res)
+                } else {
+                    return Err(anyhow::anyhow!("Key is encrypted but no password supplied"))
+                }
             }
         }?;
 
@@ -564,7 +568,7 @@ mod tests {
         let con = Connection::open_in_memory().unwrap();
         // let con = Connection::open("test.db").unwrap();
         setup(&con).unwrap();
-        AutocryptStore { password: Password::from("hunter2"), con }
+        AutocryptStore { password: Some(Password::from("hunter2")), con }
     }
 
     fn insert_peer(ctx: &AutocryptStore, peer: &Peer) -> Result<()>{
