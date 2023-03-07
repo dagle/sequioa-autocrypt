@@ -12,12 +12,11 @@ use crate::sq::{DHelper, VHelper};
 // TODO:
 // [x] Run tests!
 // [ ] Return stuff from verify/decrypt
-// [ ] Export stuff
-// [ ] Change new to take a path and not a directory or a engine
-// [ ] Support a generic db engine (https://github.com/tokio-rs/rdbc)
-// [x] Feature: a canonicalized_email function
+// [x] Feature: a canonicalized_email function (create a feature)
 // [ ] Feature: Account settings
 // [x] Clean up, move to multiple files
+// [ ] Change new to take a path and not a directory or a engine 
+// [ ] Support a generic db engine (https://github.com/tokio-rs/rdbc)
 
 static DBNAME: &'static str = "autocrypt.db";
 
@@ -39,9 +38,13 @@ pub enum UIRecommendation {
 pub struct Account {
     pub mail: String,
     pub cert: Cert,
+    // TODO: put enable into flag
+    // pub enable: bool,
 }
 
 pub fn setup(con: &Connection) -> Result<()> {
+    // TODO: put enable into flag
+            // enable int;
     let accountschema =
         "CREATE TABLE account (
             address text primary key not null, 
@@ -124,10 +127,12 @@ impl<'a> AutocryptStore<'a> {
             let mail: String = row.get(0)?;
             let keystr: String = row.get(1)?;
             let key: Cert = CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok()).ok_or(anyhow::anyhow!("No valid key found for account"))?;
+            // let enable: bool = row.get(2);
 
             return Ok(Account {
                 mail,
                 cert: key,
+                // enable,
             })
         }
         return Err(anyhow::anyhow!("No Account found"));
