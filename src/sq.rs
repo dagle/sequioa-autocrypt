@@ -64,8 +64,8 @@ impl<'a> VerificationHelper for VHelper<'a> {
             match id {
                 openpgp::KeyHandle::Fingerprint(fpr) => {
                     if let Ok(peer) = self.ctx.get_peer_fpr(fpr) {
-                        if let Some(c) = peer.cert { certs.push(c) }
-                        if let Some(c) = peer.gossip_cert { certs.push(c) }
+                        if let Some(c) = peer.cert { certs.push(c.into_owned()) }
+                        if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
                     }
                 }
                 // TODO: Handle this

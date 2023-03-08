@@ -1,5 +1,5 @@
 extern crate sequoia_openpgp as openpgp;
-use std::{path::PathBuf, time::SystemTime, cmp::Ordering, io::{Read, Write, self}};
+use std::{path::PathBuf, time::SystemTime, cmp::Ordering, io::{Read, Write, self}, borrow::Cow};
 
 use anyhow::Context;
 use chrono::{Utc, DateTime, NaiveDateTime, Duration};
@@ -121,7 +121,7 @@ impl AutocryptStore {
         return Err(anyhow::anyhow!("No Account found"));
 
     }
-    fn row_to_peer(rows: &mut Rows) -> Result<Peer> {
+    fn row_to_peer<'a>(rows: &mut Rows) -> Result<Peer<'a>> {
         if let Some(row) = rows.next()? {
             let mail: String = row.get(0)?;
             let unix: i64 = row.get(1)?;
@@ -135,16 +135,18 @@ impl AutocryptStore {
 
             let timestamp = get_time!(row.get(2));
             let keystr: Option<String> = row.get(3)?;
-            let key: Option<Cert> = if let Some(keystr) = keystr {
+            let key: Option<Cow<Cert>> = if let Some(keystr) = keystr {
                 CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok())
+                .map(Cow::Owned)
             } else {
                 None
             };
 
             let gossip_timestamp = get_time!(row.get(2));
             let gossip_keystr: Option<String> = row.get(5)?;
-            let gossip_key: Option<Cert> = if let Some(keystr) = gossip_keystr {
+            let gossip_key: Option<Cow<Cert>> = if let Some(keystr) = gossip_keystr {
                 CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok())
+                .map(Cow::Owned)
             } else {
                 None
             };
@@ -282,21 +284,16 @@ impl AutocryptStore {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_peer(&self, mail: &str, last_seen: DateTime<Utc>,
-        timestamp: Option<DateTime<Utc>>, cert: Option<&Cert>, 
-        gossip_timestamp: Option<DateTime<Utc>>, gossip_cert: Option<&Cert>
-        , prefer: bool) -> Result<()>{
-
-        let keystr = if let Some(key) = cert {
+    fn insert_peer(&self, peer: &Peer) -> Result<()>{
+        let keystr = if let Some(ref key) = peer.cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None };
-        let keystr_fpr = cert.as_ref().map(|c| c.fingerprint().to_hex());
+        let keystr_fpr = peer.cert.as_ref().map(|c| c.fingerprint().to_hex());
 
-        let gossip_keystr = if let Some(key) = gossip_cert {
+        let gossip_keystr = if let Some(ref key) = peer.gossip_cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None};
-        let gossip_keystr_fpr = gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
+        let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
 
         let insertstmt = 
             "INSERT or REPLACE into peer (
@@ -311,15 +308,15 @@ impl AutocryptStore {
                 prefer)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?)";
         self.con.execute(insertstmt, params![
-            &mail, 
-            &last_seen.timestamp(),
-            &timestamp.map(|t| t.timestamp()),
+            &peer.mail, 
+            &peer.last_seen.timestamp(),
+            &peer.timestamp.map(|t| t.timestamp()),
             &keystr,
             &keystr_fpr,
-            &gossip_timestamp.map(|t| t.timestamp()),
+            &peer.gossip_timestamp.map(|t| t.timestamp()),
             &gossip_keystr,
             &gossip_keystr_fpr,
-            &prefer,
+            &peer.prefer,
         ])?;
         Ok(())
     }
@@ -329,16 +326,11 @@ impl AutocryptStore {
         prefer: bool, effective_date: DateTime<Utc>, gossip: bool) -> Result<bool> {
         match self.get_peer(canonicalized_mail) {
             Err(_) => {
-                if gossip {
-                    self.insert_peer(canonicalized_mail, effective_date, 
-                        None, None, Some(effective_date), Some(key), prefer)?;
-                } else {
-                    self.insert_peer(canonicalized_mail, effective_date, 
-                        Some(effective_date), Some(key), None, None, prefer)?;
-                }
+                let peer = Peer::new(canonicalized_mail, effective_date, key, gossip, prefer);
+                self.insert_peer(&peer)?;
                 Ok(true)
             }
-            Ok(peer) => {
+            Ok(mut peer) => {
                 if effective_date.cmp(&peer.last_seen) == Ordering::Less {
                     return Ok(false)
                 }
@@ -346,16 +338,16 @@ impl AutocryptStore {
                 if !gossip {
                     if peer.timestamp.is_none() || 
                         effective_date.cmp(&peer.timestamp.unwrap()) == Ordering::Greater {
-                            self.insert_peer(canonicalized_mail, effective_date, 
-                                Some(effective_date), Some(key), peer.gossip_timestamp, 
-                                peer.gossip_cert.as_ref(), prefer)?;
+                            peer.timestamp = Some(effective_date);
+                            peer.cert = Some(Cow::Borrowed(key));
+                            self.insert_peer(&peer)?;
                             return Ok(true)
                     }
                 } else if peer.gossip_timestamp.is_none() ||
                         effective_date.cmp(&peer.gossip_timestamp.unwrap()) == Ordering::Greater {
-                            self.insert_peer(canonicalized_mail, effective_date, 
-                                peer.timestamp, peer.cert.as_ref(), Some(effective_date), 
-                                Some(key), prefer)?;
+                            peer.gossip_timestamp = Some(effective_date);
+                            peer.gossip_cert = Some(Cow::Borrowed(key));
+                            self.insert_peer(&peer)?;
                             return Ok(true)
                 }
                 self.update_last_seen(canonicalized_mail, &effective_date)?;
@@ -500,13 +492,15 @@ impl AutocryptStore {
 
         Ok(())
     }
-    pub fn decrypt(&self, policy: &dyn Policy, canonicalized_mail: &str,
+    pub fn decrypt<S>(&self, policy: &dyn Policy, canonicalized_mail: &str,
         input: &mut (dyn Read + Send + Sync), output: &mut (dyn Write + Send + Sync),
-        sk: Option<SessionKey>)
-        -> Result<()> {
+        sk: S)
+        -> Result<()> 
+        where  S: Into<Option<SessionKey>>
+    {
 
             let account = self.get_account(canonicalized_mail)?;
-            let helper = DHelper::new(self, policy, account.cert, sk);
+            let helper = DHelper::new(self, policy, account.cert, sk.into());
             let mut decryptor = DecryptorBuilder::from_reader(input)?
                 .with_policy(policy, None, helper)
                 .context("Decryption failed")?;
@@ -566,16 +560,8 @@ mod tests {
 
     fn test_db() -> AutocryptStore {
         let con = Connection::open_in_memory().unwrap();
-        // let con = Connection::open("test.db").unwrap();
         setup(&con).unwrap();
         AutocryptStore { password: Some(Password::from("hunter2")), con }
-    }
-
-    fn insert_peer(ctx: &AutocryptStore, peer: &Peer) -> Result<()>{
-        ctx.insert_peer(&peer.mail, peer.last_seen, peer.timestamp,
-            peer.cert.as_ref(), peer.gossip_timestamp,
-            peer.gossip_cert.as_ref(), peer.prefer)
-
     }
 
     fn gen_peer(ctx: &AutocryptStore, canonicalized_mail: &str, mode: Mode, prefer: bool) 
@@ -606,8 +592,8 @@ mod tests {
 
         // Since we don't we don't we don't do as as_tsk() in insert_peer, we won't write the
         // private key
-        let peer = Peer::new(canonicalized_mail, Utc::now(), cert, mode == Mode::Gossip, prefer);
-        insert_peer(&ctx, &peer).unwrap();
+        let peer = Peer::new(canonicalized_mail, Utc::now(), &cert, mode == Mode::Gossip, prefer);
+        ctx.insert_peer(&peer).unwrap();
 
         Ok(())
     }
@@ -742,8 +728,8 @@ mod tests {
         ctx.update_private_key(&policy, OUR).unwrap();
         let account = ctx.get_account(OUR).unwrap();
 
-        let peer = Peer::new(OUR, Utc::now(), account.cert, false, true);
-        insert_peer(&ctx, &peer).unwrap();
+        let peer = Peer::new(OUR, Utc::now(), &account.cert, false, true);
+        ctx.insert_peer(&peer).unwrap();
 
         let input = "This is a small  to test encryption";
 

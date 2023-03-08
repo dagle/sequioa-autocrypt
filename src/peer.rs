@@ -1,4 +1,6 @@
 extern crate sequoia_openpgp as openpgp;
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use openpgp::{Cert, policy::Policy, serialize::stream::Recipient};
 use crate::Result;
@@ -17,24 +19,24 @@ macro_rules! encrypt_key {
 }
 
 #[derive(PartialEq, Debug)]
-pub struct Peer {
+pub struct Peer<'a> {
     pub mail: String,
     pub last_seen: DateTime<Utc>,
     pub timestamp: Option<DateTime<Utc>>,
-    pub cert: Option<Cert>,
+    pub cert: Option<Cow<'a, Cert>>,
     pub gossip_timestamp: Option<DateTime<Utc>>,
-    pub gossip_cert: Option<Cert>,
+    pub gossip_cert: Option<Cow<'a, Cert>>,
     pub prefer: bool,
 }
 
-impl<'a> Peer {
-    pub fn new(mail: &str, now: DateTime<Utc>, key: Cert, gossip: bool, prefer: bool) -> Self{
+impl<'a> Peer<'a> {
+    pub fn new(mail: &str, now: DateTime<Utc>, key: &'a Cert, gossip: bool, prefer: bool) -> Self{
         if !gossip {
             Peer {
                 mail: mail.to_owned(),
                 last_seen: now,
                 timestamp: Some(now),
-                cert: Some(key),
+                cert: Some(Cow::Borrowed(key)),
                 gossip_timestamp: None,
                 gossip_cert: None,
                 prefer,
@@ -46,7 +48,7 @@ impl<'a> Peer {
                 timestamp: None,
                 cert: None,
                 gossip_timestamp: Some(now),
-                gossip_cert: Some(key),
+                gossip_cert: Some(Cow::Borrowed(key)),
                 prefer,
             }
         }
