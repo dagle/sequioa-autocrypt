@@ -44,13 +44,15 @@ impl std::str::FromStr for SessionKey {
 
 pub struct VHelper<'a> {
     ctx: &'a AutocryptStore,
+    account_email: Option<&'a str>,
 }
 
 impl<'a> VHelper<'a> {
-    pub fn new(ctx: &'a AutocryptStore)
+    pub fn new(ctx: &'a AutocryptStore, account_email: Option<&'a str>)
            -> Self {
         VHelper {
             ctx,
+            account_email,
         }
     }
 }
@@ -63,7 +65,7 @@ impl<'a> VerificationHelper for VHelper<'a> {
         for id in _ids {
             match id {
                 openpgp::KeyHandle::Fingerprint(fpr) => {
-                    if let Ok(peer) = self.ctx.get_peer_fpr(fpr) {
+                    if let Ok(peer) = self.ctx.get_peer_fpr(self.account_email, fpr) {
                         if let Some(c) = peer.cert { certs.push(c.into_owned()) }
                         if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
                     }
@@ -127,7 +129,7 @@ pub struct DHelper<'a> {
 }
 
 impl<'a> DHelper<'a> {
-    pub fn new(ctx: &'a AutocryptStore, policy: &dyn Policy, 
+    pub fn new(ctx: &'a AutocryptStore, policy: &dyn Policy, account_mail: Option<&'a str>,
         cert: Cert, sk: Option<SessionKey>) -> Self {
         let mut keys: HashMap<KeyID, PrivateKey> = HashMap::new();
 
@@ -146,7 +148,7 @@ impl<'a> DHelper<'a> {
             sk,
             keys,
             fp: cert.fingerprint(),
-            helper: VHelper::new(ctx),
+            helper: VHelper::new(ctx, account_mail),
         }
     }
 }

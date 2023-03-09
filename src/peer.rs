@@ -64,6 +64,7 @@ impl FromSql for Prefer {
 #[derive(PartialEq, Debug)]
 pub struct Peer<'a> {
     pub mail: String,
+    pub account: String,
     pub last_seen: DateTime<Utc>,
     pub timestamp: Option<DateTime<Utc>>,
     pub cert: Option<Cow<'a, Cert>>,
@@ -73,10 +74,11 @@ pub struct Peer<'a> {
 }
 
 impl<'a> Peer<'a> {
-    pub fn new(mail: &str, now: DateTime<Utc>, key: &'a Cert, gossip: bool, prefer: Prefer) -> Self{
+    pub fn new(mail: &str, account: &str, now: DateTime<Utc>, key: &'a Cert, gossip: bool, prefer: Prefer) -> Self{
         if !gossip {
             Peer {
                 mail: mail.to_owned(),
+                account: account.to_owned(),
                 last_seen: now,
                 timestamp: Some(now),
                 cert: Some(Cow::Borrowed(key)),
@@ -87,6 +89,7 @@ impl<'a> Peer<'a> {
         } else {
             Peer {
                 mail: mail.to_owned(),
+                account: account.to_owned(),
                 last_seen: now,
                 timestamp: None,
                 cert: None,
