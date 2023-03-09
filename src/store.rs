@@ -225,7 +225,7 @@ impl AutocryptStore {
                 None
             };
 
-            let gossip_timestamp = get_time!(row.get(2));
+            let gossip_timestamp = get_time!(row.get(4));
             let gossip_keystr: Option<String> = row.get(5)?;
             let gossip_key: Option<Cow<Cert>> = if let Some(keystr) = gossip_keystr {
                 CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok())
