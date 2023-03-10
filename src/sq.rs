@@ -7,6 +7,7 @@ use openpgp::fmt::hex;
 use openpgp::packet::{key, Key, PKESK};
 use openpgp::policy::Policy;
 use openpgp::types::{SymmetricAlgorithm, PublicKeyAlgorithm};
+use crate::driver::{SqlDriver, Selector};
 use crate::store::AutocryptStore;
 use crate::Result;
 
@@ -42,13 +43,13 @@ impl std::str::FromStr for SessionKey {
     }
 }
 
-pub struct VHelper<'a> {
-    ctx: &'a AutocryptStore,
+pub struct VHelper<'a, T: SqlDriver> {
+    ctx: &'a AutocryptStore<T>,
     account_email: Option<&'a str>,
 }
 
-impl<'a> VHelper<'a> {
-    pub fn new(ctx: &'a AutocryptStore, account_email: Option<&'a str>)
+impl<'a, T: SqlDriver> VHelper<'a, T> {
+    pub fn new(ctx: &'a AutocryptStore<T>, account_email: Option<&'a str>)
            -> Self {
         VHelper {
             ctx,
@@ -57,7 +58,7 @@ impl<'a> VHelper<'a> {
     }
 }
 
-impl<'a> VerificationHelper for VHelper<'a> {
+impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T> {
     /// Get keys from the db, we get both keys and gossip_keys
     /// matching the fingerprint and keyid
     fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
@@ -65,13 +66,17 @@ impl<'a> VerificationHelper for VHelper<'a> {
         for id in _ids {
             match id {
                 openpgp::KeyHandle::Fingerprint(fpr) => {
-                    if let Ok(peer) = self.ctx.get_peer_fpr(self.account_email, fpr) {
+                    if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, Selector::Fpr(fpr)) {
                         if let Some(c) = peer.cert { certs.push(c.into_owned()) }
                         if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
                     }
                 }
-                // TODO: Handle this
-                openpgp::KeyHandle::KeyID(_) => todo!(),
+                openpgp::KeyHandle::KeyID(id) => {
+                    if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, Selector::KeyID(id)) {
+                        if let Some(c) = peer.cert { certs.push(c.into_owned()) }
+                        if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
+                    }
+                }
             }
         }
         Ok(certs)
@@ -119,17 +124,17 @@ impl PrivateKey {
     }
 }
 
-pub struct DHelper<'a> {
-    ctx: &'a AutocryptStore,
+pub struct DHelper<'a, T: SqlDriver> {
+    ctx: &'a AutocryptStore<T>,
     sk: Option<SessionKey>,
     keys: HashMap<KeyID, PrivateKey>,
     fp: Fingerprint,
 
-    helper: VHelper<'a>,
+    helper: VHelper<'a, T>,
 }
 
-impl<'a> DHelper<'a> {
-    pub fn new(ctx: &'a AutocryptStore, policy: &dyn Policy, account_mail: Option<&'a str>,
+impl<'a, T: SqlDriver> DHelper<'a, T> {
+    pub fn new(ctx: &'a AutocryptStore<T>, policy: &dyn Policy, account_mail: Option<&'a str>,
         cert: Cert, sk: Option<SessionKey>) -> Self {
         let mut keys: HashMap<KeyID, PrivateKey> = HashMap::new();
 
@@ -152,7 +157,7 @@ impl<'a> DHelper<'a> {
         }
     }
 }
-impl<'a> VerificationHelper for DHelper<'a> {
+impl<'a, T: SqlDriver> VerificationHelper for DHelper<'a, T> {
     fn get_certs(&mut self, ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
         // TODO: Being able to turn off verification
 
@@ -164,7 +169,7 @@ impl<'a> VerificationHelper for DHelper<'a> {
     }
 }
 
-impl<'a> DHelper<'a> {
+impl<'a, T: SqlDriver> DHelper<'a, T> {
     fn try_decrypt<D>(&self, pkesk: &PKESK,
                       sym_algo: Option<SymmetricAlgorithm>,
                       _pk_algo: PublicKeyAlgorithm,
@@ -181,7 +186,7 @@ impl<'a> DHelper<'a> {
     }
 }
 
-impl<'a> DecryptionHelper for DHelper<'a> {
+impl<'a, T: SqlDriver> DecryptionHelper for DHelper<'a, T> {
     // We don't use the skesks because we know that the key should be
     // a pkesk with autoencrypt, since it only allows those kind of encryptions.
     fn decrypt<D>(&mut self,

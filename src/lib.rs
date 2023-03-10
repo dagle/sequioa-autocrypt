@@ -7,6 +7,10 @@
 pub mod sq;
 pub mod peer;
 pub mod store;
+pub mod sql;
+pub mod driver;
+pub mod account;
+pub mod sqlite;
 
 pub type Result<T> = sequoia_openpgp::Result<T>;
 
