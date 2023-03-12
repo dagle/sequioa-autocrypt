@@ -1,4 +1,5 @@
 extern crate sequoia_openpgp as openpgp;
+use sequoia_autocrypt_store as acs;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -9,10 +10,11 @@ use sequoia_openpgp::cert::CertParser;
 use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::serialize::{Serialize, SerializeInto};
 
-use crate::driver::SqlDriver;
-use crate::peer::Prefer;
+pub mod sql;
+
+use acs::driver::{SqlDriver, Selector};
 use crate::sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT};
-use crate::{Result, peer::Peer, account::Account};
+use acs::{Result, peer::{Peer, Prefer}, account::Account};
 
 macro_rules! count {
     () => (0usize);
@@ -218,15 +220,15 @@ impl SqlDriver for SqliteDriver {
         Ok(())
     }
 
-    fn get_peer(&self, account_mail: Option<&str>, selector: crate::driver::Selector) -> Result<Peer> {
+    fn get_peer(&self, account_mail: Option<&str>, selector: Selector) -> Result<Peer> {
 
         match selector {
-            crate::driver::Selector::Email(mail) =>
+            Selector::Email(mail) =>
                 peer_fun!(self, account_mail, "address = ?1", mail), 
-            crate::driver::Selector::Fpr(fpr) => 
+            Selector::Fpr(fpr) => 
                 peer_fun!(self, account_mail, "(key_fpr = ?1 or gossip_key_fpr = ?1)",
                 fpr.to_hex()),
-            crate::driver::Selector::KeyID(key_id) => 
+            Selector::KeyID(key_id) => 
                 peer_fun!(self, account_mail, "(key_keyid = ?1 or gossip_key_keiid = ?1)",
                 key_id.to_hex())
         }
