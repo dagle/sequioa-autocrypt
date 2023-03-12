@@ -1,30 +1,41 @@
 pub const ACCOUNTSCHEMA: &str =
-"CREATE TABLE account (
+"CREATE TABLE autocrypt_account (
     address text primary key not null, 
     key text,
     prefer int,
     enable int
 )";
 
-pub const ACCOUNTSTMT: &str =
+pub const ACCOUNTGET: &str =
 "SELECT
     address, 
     key, 
     prefer,
     enable
-FROM account 
+FROM autocrypt_account 
 WHERE address = ?";
 
 pub const ACCOUNTINSERT: &str =
-"INSERT or REPLACE into account (
+"INSERT into autocrypt_account (
     address, 
     key,
     prefer,
     enable)
 values (?, ?, ?, ?);";
 
+pub const ACCOUNTUPDATE: &str =
+"UPDATE autocrypt_account SET 
+    key = ?,
+    prefer = ?,
+    enable = ?
+WHERE address = ?";
+
+pub const ACCOUNTDELETE: &str =
+    "DELETE FROM autocrypt_account 
+    WHERE address = ?;";
+
 pub const PEERSCHEMA: &str = 
-"CREATE TABLE peer (
+"CREATE TABLE autocrypt_peer (
     address text not null, 
     last_seen INT8, 
     timestamp INT8,
@@ -40,7 +51,7 @@ pub const PEERSCHEMA: &str =
 )";
 
 pub const PEERINSERT: &str =
-"INSERT or REPLACE into peer (
+"INSERT into autocrypt_peer (
     address, 
     last_seen,
     timestamp,
@@ -53,14 +64,20 @@ pub const PEERINSERT: &str =
     account)
 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-pub const SEENUPDATE: &str =
-"UPDATE peer
-SET last_seen = ?1
-WHERE address = ?2
-AND last_seen < ?1";
-// AND account = ?3
+pub const PEERUPDATE: &str =
+"UPDATE autocrypt_peer SET 
+    last_seen = ?1,
+    timestamp = ?2,
+    key = ?3,
+    key_fpr = ?4,
+    gossip_timestamp = ?5,
+    gossip_key = ?6,
+    gossip_key_fpr = ?7,
+    prefer = ?8,
+    account = ?9
+WHERE address = ?10";
 
-pub const PEERSTMT: &str = 
+pub const PEERGET: &str = 
 "SELECT
 address, 
     last_seen, 
@@ -70,4 +87,4 @@ address,
     gossip_key, 
     prefer,
     account
-    FROM peer";
+    FROM autocrypt_peer";

@@ -7,7 +7,7 @@ use openpgp::fmt::hex;
 use openpgp::packet::{key, Key, PKESK};
 use openpgp::policy::Policy;
 use openpgp::types::{SymmetricAlgorithm, PublicKeyAlgorithm};
-use crate::driver::{SqlDriver, Selector};
+use crate::driver::SqlDriver;
 use crate::store::AutocryptStore;
 use crate::Result;
 
@@ -64,19 +64,9 @@ impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T> {
     fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
         let mut certs = Vec::new();
         for id in _ids {
-            match id {
-                openpgp::KeyHandle::Fingerprint(fpr) => {
-                    if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, Selector::Fpr(fpr)) {
-                        if let Some(c) = peer.cert { certs.push(c.into_owned()) }
-                        if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
-                    }
-                }
-                openpgp::KeyHandle::KeyID(id) => {
-                    if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, Selector::KeyID(id)) {
-                        if let Some(c) = peer.cert { certs.push(c.into_owned()) }
-                        if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
-                    }
-                }
+            if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, id.into()) {
+                if let Some(c) = peer.cert { certs.push(c.into_owned()) }
+                if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
             }
         }
         Ok(certs)

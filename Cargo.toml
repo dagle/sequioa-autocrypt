@@ -1,8 +1,22 @@
-[package]
-name = "sequioa-autocrypt-store"
+[workspace]
+members = [
+	".",
+    "rusqlite-driver",
+	# "diesel",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 authors = ["Per Odlund <odlund@posteo.net>"]
+
+[package]
+version.workspace = true
+# license.workspace = true
+edition.workspace = true
+authors.workspace = true
+# repository.workspace = true
+name = "sequoia-autocrypt-store"
 
 [dependencies]
 anyhow = "1.0.69"

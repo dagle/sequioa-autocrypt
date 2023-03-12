@@ -1,23 +1,28 @@
 extern crate sequoia_openpgp as openpgp;
-use std::{path::PathBuf, time::SystemTime, cmp::Ordering, io::{Read, Write, self}, borrow::Cow};
+use std::{time::SystemTime, cmp::Ordering, io::{Read, Write, self}, borrow::Cow};
 
 use anyhow::Context;
 use chrono::{Utc, DateTime, Duration};
-use openpgp::{Cert, cert::{CertBuilder, CipherSuite, amalgamation::ValidateAmalgamation}, Fingerprint, packet::Signature, types::{KeyFlags, CompressionAlgorithm}, crypto::{Password, self}, policy::Policy, serialize::{stream::{self, Recipient, Armorer, Encryptor, Compressor, LiteralWriter, Signer}, SerializeInto, Marshal}, parse::{stream::{DecryptorBuilder, DetachedVerifierBuilder, VerifierBuilder}, Parse}};
+use openpgp::{Cert, cert::{CertBuilder, CipherSuite, amalgamation::ValidateAmalgamation}, packet::Signature, types::{KeyFlags, CompressionAlgorithm}, crypto::{Password, self}, policy::Policy, serialize::stream::{self, Recipient, Armorer, Encryptor, Compressor, LiteralWriter, Signer}, parse::{stream::{DecryptorBuilder, DetachedVerifierBuilder, VerifierBuilder}, Parse}};
 // use rusqlite::{Connection,, Rows};
 use sequoia_autocrypt::{AutocryptHeader, AutocryptHeaderType, AutocryptSetupMessage, AutocryptSetupMessageParser};
-use crate::{Result, peer::{Peer, Prefer}, sq::SessionKey, sql::SEENUPDATE, account::Account, driver::{SqlDriver, Selector}};
+use crate::{Result, peer::{Peer, Prefer}, sq::SessionKey, account::Account, driver::{SqlDriver, Selector}};
 use openpgp::packet::prelude::SecretKeyMaterial::{Unencrypted, Encrypted};
 use crate::sq::{DHelper, VHelper};
 
 // TODO:
 // [ ] Return stuff from verify/decrypt
+// [-] Get example to work
+// [ ] Get ruslite into a feature
 // [ ] Feature: Account settings
-// [ ] Change new to take a path and not a directory or a engine 
-// [ ] Support a generic db engine (sqlx)
+// [ ] Create a driver for diesel
 // [ ] Password doesn't really work atm
+// [ ] Genkey should insert a peer
 // Remove/change password, and import/export doesn't use password
 // (Per account password?)
+
+// TODO: (maybe later)
+// [ ]  Docker file for setting up a selfhosted autocrypt
 
 /// UIRecommendation represent whether or not we should encrypt an email.
 /// Disable means that we shouldn't try to encrypt because it's likely people
@@ -49,18 +54,19 @@ macro_rules! check_mode {
 }
 
 impl<T: SqlDriver> AutocryptStore<T> {
-    pub fn new(con: T, password: Option<&str>, wildcard: bool) -> Result<Self> {
-        Ok(AutocryptStore { password: password.map(Password::from), conn: con, wildmode: wildcard})
+    pub fn new(conn: T, password: Option<&str>, wildmode: bool) -> Result<Self> {
+        Ok(AutocryptStore { password: password.map(Password::from), conn, wildmode})
     }
 
     pub fn get_account(&self, canonicalized_mail: &str) -> Result<Account> {
         self.conn.get_account(canonicalized_mail)
     }
 
-    pub fn get_peer(&self, account_mail: Option<&str>, selector: Selector) -> Result<Peer> {
+    pub fn get_peer<'a, S>(&self, account_mail: Option<&str>, selector: S) -> Result<Peer>
+        where  S: Into<Selector<'a>> {
         check_mode!(self, account_mail);
 
-        self.conn.get_peer(account_mail, selector)
+        self.conn.get_peer(account_mail, selector.into())
     }
 
     fn gen_cert(&self, canonicalized_mail: &str, now: SystemTime) 
@@ -108,7 +114,7 @@ impl<T: SqlDriver> AutocryptStore<T> {
             let (cert, _) = self.gen_cert(canonicalized_mail, now)?;
             
             let account = Account::new(canonicalized_mail, cert);
-            self.conn.update_account(&account)
+            self.conn.insert_account(&account)
         }
     }
 
@@ -397,7 +403,7 @@ mod tests {
 
     fn test_db() -> AutocryptStore<SqliteDriver> {
         let conn = SqliteDriver{ conn: Connection::open_in_memory().unwrap()};
-        crate::sqlite::setup(&conn.conn).unwrap();
+        conn.setup().unwrap();
         AutocryptStore { password: Some(Password::from("hunter2")), conn, wildmode: false}
     }
 
@@ -454,6 +460,8 @@ mod tests {
         if let Ok(_) = ctx.get_account(PEER1) {
             assert!(true, "PEER1 shouldn't be in the db!")
         }
+
+        ctx.conn.delete_account(OUR, None).unwrap();
     }
 
     #[test]
@@ -467,8 +475,8 @@ mod tests {
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
         gen_peer(&ctx, &account.mail, PEER2, Mode::Seen, Prefer::Mutual).unwrap();
 
-        let peer1 = ctx.get_peer(Some(OUR), Selector::Email(PEER1)).unwrap();
-        let peer2 = ctx.get_peer(Some(OUR), Selector::Email(PEER2)).unwrap();
+        let peer1 = ctx.get_peer(Some(OUR), PEER1).unwrap();
+        let peer2 = ctx.get_peer(Some(OUR), PEER2).unwrap();
 
         assert_eq!(peer1.mail, PEER1);
         assert_eq!(peer2.mail, PEER2);
@@ -489,18 +497,18 @@ mod tests {
 
         let now = Utc::now();
 
-        let peer1 = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let peer1 = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
 
         let (cert, _) = ctx.gen_cert(PEER1, now.into()).unwrap();
 
         ctx.update_peer(&account.mail, PEER1, &cert, Prefer::Nopreference, Utc::now(), true).unwrap();
 
-        let updated = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let updated = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
 
         assert_ne!(peer1, updated);
 
         ctx.update_peer(&account.mail, PEER1, &cert, Prefer::Nopreference, Utc::now(), false).unwrap();
-        let replaced = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let replaced = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
 
         assert_ne!(replaced, updated)
     }
@@ -515,14 +523,14 @@ mod tests {
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
-        let old_peer = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let old_peer = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
 
         let past = Utc::now() - Duration::days(150);
         let (cert, _) = ctx.gen_cert(PEER1, past.into()).unwrap();
 
         ctx.update_peer(&account.mail, PEER1, &cert, Prefer::Nopreference, past, false).unwrap();
 
-        let same_peer = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let same_peer = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
         assert_eq!(old_peer, same_peer);
     }
 
@@ -536,12 +544,12 @@ mod tests {
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
-        let before = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let before = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
 
         let future = Utc::now() + Duration::days(1);
         ctx.update_last_seen(Some(&account.mail), PEER1, future).unwrap();
 
-        let peer = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let peer = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
         assert_ne!(before.last_seen, peer.last_seen);
     }
 
@@ -554,7 +562,7 @@ mod tests {
         let account = ctx.get_account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
-        let peer = ctx.get_peer(Some(&account.mail), Selector::Email(PEER1)).unwrap();
+        let peer = ctx.get_peer(Some(&account.mail), PEER1).unwrap();
 
         let history = Utc::now() - Duration::days(150);
 
@@ -562,6 +570,19 @@ mod tests {
 
 
         assert_ne!(history, peer.last_seen);
+    }
+
+    #[test]
+    fn test_delete_peer() {
+        let ctx = test_db();
+
+        let policy = StandardPolicy::new();
+        ctx.update_private_key(&policy, OUR).unwrap();
+        let account = ctx.get_account(OUR).unwrap();
+
+        gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
+
+        ctx.conn.delete_peer(Some(OUR), PEER1).unwrap();
     }
 
     #[test]

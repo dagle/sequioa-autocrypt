@@ -1,4 +1,4 @@
-use sequoia_openpgp::{Fingerprint, KeyID, Cert};
+use sequoia_openpgp::{Fingerprint, KeyID, KeyHandle};
 use crate::{Result, peer::Peer, account::Account};
 
 pub enum Selector<'a> {
@@ -7,7 +7,32 @@ pub enum Selector<'a> {
     KeyID(&'a KeyID)
 }
 
-// TODO: into function from KeyHandle
+impl<'a> From<&'a Fingerprint> for Selector<'a> {
+    fn from(value: &'a Fingerprint) -> Self {
+        Self::Fpr(value)
+    }
+}
+
+impl<'a> From<&'a KeyID> for Selector<'a> {
+    fn from(value: &'a KeyID) -> Self {
+        Self::KeyID(value)
+    }
+}
+
+impl<'a> From<&'a str> for Selector<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::Email(value)
+    }
+}
+
+impl<'a> From<&'a KeyHandle> for Selector<'a> {
+    fn from(value: &'a KeyHandle) -> Self {
+        match  value {
+            KeyHandle::Fingerprint(fpr) => Self::Fpr(fpr),
+            KeyHandle::KeyID(id) => Self::KeyID(id),
+        }
+    }
+}
 
 /// SqlDriver is crud trait around accounts and peers.
 pub trait SqlDriver {
@@ -15,11 +40,14 @@ pub trait SqlDriver {
     /// * `canonicalized_mail` canonicalized address for easier comparisons  
     fn get_account(&self, canonicalized_mail: &str) -> Result<Account>;
 
-    // fn insert_account(&self, canonicalized_mail: &str, cert: &Cert) -> Result<()>;
+    fn insert_account(&self, account: &Account) -> Result<()>;
 
     fn update_account(&self, account: &Account) -> Result<()>;
 
-    fn delete_account(&self, accoun: &Account) -> Result<()>;
+    // Delete the account and all the peers account connected to an account
+    // If we are using wildmode, we transfer the peers if transfer is set or
+    // delete otherwise.
+    fn delete_account(&self, canonicalized_mail: &str, transfer: Option<&str>) -> Result<()>;
 
     /// Get a peer for an email (if it exist), 
     ///
@@ -32,7 +60,7 @@ pub trait SqlDriver {
     fn get_peer(&self, account_mail: Option<&str>, selector: Selector) -> Result<Peer>;
 
     // should this have a wildmode?
-    fn delete_peer(&self, peer: &Peer) -> Result<()>;
+    fn delete_peer(&self, account_mail: Option<&str>, canonicalized_mail: &str) -> Result<()>;
 
     /// Inserting a peer, if we are running in wildmode we shouldn't insert
     /// a peer if it exist for another account. If get_peer is implemented correctly

@@ -1,6 +1,6 @@
 extern crate sequoia_openpgp as openpgp;
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::Path;
 
 use chrono::{DateTime, Utc, NaiveDateTime};
 use rusqlite::{Connection, params, Rows};
@@ -11,61 +11,8 @@ use sequoia_openpgp::serialize::{Serialize, SerializeInto};
 
 use crate::driver::SqlDriver;
 use crate::peer::Prefer;
-use crate::sql::PEERSTMT;
+use crate::sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT};
 use crate::{Result, peer::Peer, account::Account};
-
-static DBNAME: &str = "autocrypt.db";
-
-pub fn setup(con: &Connection) -> Result<()> {
-    // we create all fields even if we
-    // don't use prefer and enable 
-    // unless account-settings is enabled
-    // is enabled
-    let accountschema =
-        "CREATE TABLE account (
-            address text primary key not null, 
-            key text,
-            prefer int,
-            enable int
-            )";
-    con.execute(accountschema, [])?;
-
-    // should a peer be connect with an Account?
-    let peerschema = 
-        "CREATE TABLE peer (
-            address text not null, 
-            last_seen INT8, 
-            timestamp INT8,
-            key text,
-            key_fpr,
-            gossip_timestamp INT8,
-            gossip_key text,
-            gossip_key_fpr,
-            prefer int,
-            account text,
-            FOREIGN KEY(account) REFERENCES account(address),
-            PRIMARY KEY(address, account)
-            )";
-
-    con.execute(peerschema, [])?;
-    Ok(())
-}
-
-// macro_rules! peerstmt {
-//     ($($selector:expr),*) => {
-//         concat!("SELECT
-//             address, 
-//             last_seen, 
-//             timestamp, 
-//             key, 
-//             gossip_timestamp, 
-//             gossip_key, 
-//             prefer,
-//             account
-//             FROM peer
-//             ", $selector,*)
-//     };
-// }
 
 macro_rules! count {
     () => (0usize);
@@ -78,7 +25,7 @@ macro_rules! peer_fun {
         if let Some(account_mail) = $account {
             let num = count!($($param)*) + 1;
             let sqlstr = format!("{} WHERE {} and account = ?{};",
-                PEERSTMT, $selector, num);
+                PEERGET, $selector, num);
             let mut selectstmt = $self.conn.prepare(&sqlstr)?;
 
             let mut rows = selectstmt.query(params![
@@ -88,7 +35,7 @@ macro_rules! peer_fun {
 
             Self::row_to_peer(&mut rows)
         } else {
-            let sqlstr = format!("{} WHERE {};", PEERSTMT, $selector);
+            let sqlstr = format!("{} WHERE {};", PEERGET, $selector);
             let mut selectstmt = $self.conn.prepare(&sqlstr)?;
             let mut rows = selectstmt.query(params![
                 $($param),*
@@ -123,12 +70,22 @@ pub struct SqliteDriver {
 }
 
 impl SqliteDriver {
-    pub fn new(path: &str) -> Result<Self> {
-        let mut dbpath = PathBuf::new();
-        dbpath.push(path);
-        dbpath.push(DBNAME);
-        let con = Connection::open(dbpath)?;
-        Ok(SqliteDriver { conn: con })
+    pub fn new<P>(path: P) -> Result<Self>
+        where P: AsRef<Path>
+    {
+        let conn = Connection::open(path)?;
+        Ok(SqliteDriver { conn })
+    }
+
+    pub fn setup(&self) -> Result<()> {
+        // we create all fields even if we
+        // don't use prefer and enable 
+        // unless account-settings is enabled
+        // is enabled
+        self.conn.execute(ACCOUNTSCHEMA, [])?;
+
+        self.conn.execute(PEERSCHEMA, [])?;
+        Ok(())
     }
 
     fn row_to_peer<'a>(rows: &mut Rows) -> Result<Peer<'a>> {
@@ -180,14 +137,7 @@ impl SqliteDriver {
 
 impl SqlDriver for SqliteDriver {
     fn get_account(&self, canonicalized_mail: &str) -> Result<Account> {
-        let mut selectstmt = self.conn.prepare(
-            "SELECT
-            address, 
-            key, 
-            prefer,
-            enable
-            FROM account 
-            WHERE address = ?")?;
+        let mut selectstmt = self.conn.prepare(ACCOUNTGET)?;
 
         let mut rows = selectstmt.query(params![
             canonicalized_mail
@@ -214,41 +164,57 @@ impl SqlDriver for SqliteDriver {
         return Err(anyhow::anyhow!("No Account found"));
     }
 
-    // fn insert_account(&self, canonicalized_mail: &str, &cert: openpgp::Cert) -> Result<()> {
-    //     let account = Account { 
-    //         mail: canonicalized_mail.to_owned(), cert, prefer: Prefer::Nopreference, enable: false };
-    //     self.update_account(&account)
-    // }
-
-    fn update_account(&self, account: &Account) -> Result<()> {
+    fn insert_account(&self, account: &Account) -> Result<()> {
         let output = &mut Vec::new();
         account.cert.as_tsk().armored().serialize(output)?;
         let certstr = std::str::from_utf8(output)?;
+
         // should we insert the rev cert into the db too?
-        let accountstmt = 
-            "INSERT or REPLACE into account (
-                address, 
-                key,
-                prefer,
-                enable)
-            values (?, ?, ?, ?);";
-        self.conn.execute(accountstmt, params![
+        self.conn.execute(ACCOUNTINSERT, params![
             &account.mail, 
             &certstr,
-            // todo
-
             &account.prefer,
             &account.enable,
         ])?;
         Ok(())
     }
 
-    fn delete_account(&self, account: &Account) -> Result<()> {
-        let accountdelete = 
-            "DELETE FROM account 
-            WHERE account = ?;";
+    fn update_account(&self, account: &Account) -> Result<()> {
+        let output = &mut Vec::new();
+        account.cert.as_tsk().armored().serialize(output)?;
+        let certstr = std::str::from_utf8(output)?;
 
-        self.conn.execute(accountdelete, params![&account.mail])?;
+        self.conn.execute(ACCOUNTUPDATE, params![
+            &certstr,
+            &account.prefer,
+            &account.enable,
+            &account.mail, 
+        ])?;
+        Ok(())
+    }
+
+    fn delete_account(&self, canonicalized_mail: &str, transfer: Option<&str>) -> Result<()> {
+        if let Some(transfer) = transfer {
+            let peers = 
+                "UPDATE autocrypt_peer SET
+                account = ?1,
+                WHERE account = ?2";
+            self.conn.execute(peers, params![
+                transfer,
+                canonicalized_mail
+            ])?;
+        } else {
+            let peers = 
+                "DELETE FROM autocrypt_peer
+                WHERE account = ?";
+            self.conn.execute(peers, params![canonicalized_mail])?;
+        }
+
+        let accountdelete = 
+            "DELETE FROM autocrypt_account 
+            WHERE address = ?;";
+
+        self.conn.execute(accountdelete, params![&canonicalized_mail])?;
         Ok(())
     }
 
@@ -266,11 +232,18 @@ impl SqlDriver for SqliteDriver {
         }
     }
 
-    fn delete_peer(&self, peer: &Peer) -> Result<()> {
-        let accountdelete = 
-            "DELETE FROM account
-            WHERE account = ?;";
-        // self.con.execute(accountdelete, params![&account.mail])?;
+    fn delete_peer(&self, account_mail: Option<&str>, canonicalized_mail: &str) -> Result<()> {
+        if let Some(account_mail) = account_mail {
+            let accountdelete = 
+                "DELETE FROM autocrypt_peer
+                WHERE account = ? and address = ?;";
+            self.conn.execute(accountdelete, params![account_mail, canonicalized_mail])?;
+        } else {
+            let accountdelete = 
+                "DELETE FROM autocrypt_peer
+                WHERE address = ?;";
+            self.conn.execute(accountdelete, params![canonicalized_mail])?;
+        }
         Ok(())
     }
 
@@ -286,7 +259,8 @@ impl SqlDriver for SqliteDriver {
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
 
         let insertstmt = 
-            "INSERT into peer (
+
+            "INSERT into autocrypt_peer (
                 address, 
                 last_seen,
                 timestamp,
@@ -298,7 +272,7 @@ impl SqlDriver for SqliteDriver {
                 prefer,
                 account)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        self.conn.execute(insertstmt, params![
+        self.conn.execute(PEERINSERT, params![
             &peer.mail, 
             &peer.last_seen.timestamp(),
             &peer.timestamp.map(|t| t.timestamp()),
@@ -326,7 +300,7 @@ impl SqlDriver for SqliteDriver {
 
         // can we do this better?
         let insertstmt = if wildmode {
-            "UPDATE peer SET 
+            "UPDATE autocrypt_peer SET 
                 last_seen = ?1,
                 timestamp = ?2,
                 key = ?3,
@@ -338,7 +312,7 @@ impl SqlDriver for SqliteDriver {
                 account = ?9
             WHERE address = ?10 and account = ?9"
         } else {
-            "UPDATE peer SET 
+            "UPDATE autocrypt_peer SET 
                 last_seen = ?1,
                 timestamp = ?2,
                 key = ?3,
