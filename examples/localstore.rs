@@ -1,8 +1,9 @@
 use std::env::current_dir;
 use chrono::Utc;
+use sequoia_autocrypt_store_rusqlite::SqliteDriver;
 use sequoia_openpgp::{policy::{StandardPolicy, Policy}, cert::CertParser, parse::Parse};
 use sequoia_autocrypt_store as acs;
-use crate::acs::{canonicalize, peer::Prefer, sqlite::SqliteDriver, store::AutocryptStore};
+use crate::acs::{canonicalize, peer::Prefer, store::AutocryptStore};
 
 pub type Result<T> = ::std::result::Result<T, anyhow::Error>;
 
