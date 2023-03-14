@@ -1,13 +1,11 @@
-pub const ACCOUNTSCHEMA: &str =
-"CREATE TABLE IF NOT EXISTS autocrypt_account (
+pub const ACCOUNTSCHEMA: &str = "CREATE TABLE IF NOT EXISTS autocrypt_account (
     address text primary key not null, 
     key text,
     prefer int,
     enable int
 )";
 
-pub const ACCOUNTGET: &str =
-"SELECT
+pub const ACCOUNTGET: &str = "SELECT
     address, 
     key, 
     prefer,
@@ -15,27 +13,23 @@ pub const ACCOUNTGET: &str =
 FROM autocrypt_account 
 WHERE address = ?";
 
-pub const ACCOUNTINSERT: &str =
-"INSERT into autocrypt_account (
+pub const ACCOUNTINSERT: &str = "INSERT into autocrypt_account (
     address, 
     key,
     prefer,
     enable)
 values (?, ?, ?, ?);";
 
-pub const ACCOUNTUPDATE: &str =
-"UPDATE autocrypt_account SET 
+pub const ACCOUNTUPDATE: &str = "UPDATE autocrypt_account SET 
     key = ?,
     prefer = ?,
     enable = ?
 WHERE address = ?";
 
-pub const ACCOUNTDELETE: &str =
-    "DELETE FROM autocrypt_account 
+pub const ACCOUNTDELETE: &str = "DELETE FROM autocrypt_account 
     WHERE address = ?;";
 
-pub const PEERSCHEMA: &str = 
-"CREATE TABLE IF NOT EXISTS autocrypt_peer (
+pub const PEERSCHEMA: &str = "CREATE TABLE IF NOT EXISTS autocrypt_peer (
     address text not null, 
     last_seen INT8, 
     timestamp INT8,
@@ -52,8 +46,7 @@ pub const PEERSCHEMA: &str =
     PRIMARY KEY(address, account)
 )";
 
-pub const PEERINSERT: &str =
-"INSERT into autocrypt_peer (
+pub const PEERINSERT: &str = "INSERT into autocrypt_peer (
     address, 
     last_seen,
     timestamp,
@@ -68,8 +61,7 @@ pub const PEERINSERT: &str =
     account)
 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-pub const PEERUPDATE: &str =
-"UPDATE autocrypt_peer SET 
+pub const PEERUPDATE: &str = "UPDATE autocrypt_peer SET 
     last_seen = ?1,
     timestamp = ?2,
     key = ?3,
@@ -82,8 +74,7 @@ pub const PEERUPDATE: &str =
     prefer = ?10,
     account = ?11";
 
-pub const PEERGET: &str = 
-"SELECT
+pub const PEERGET: &str = "SELECT
 address, 
     last_seen, 
     timestamp, 

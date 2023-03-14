@@ -1,21 +1,27 @@
 extern crate sequoia_openpgp as openpgp;
-use rusqlite::types::{ToSqlOutput, Value, FromSql, FromSqlError};
+use rusqlite::types::{FromSql, FromSqlError, ToSqlOutput, Value};
 use std::borrow::Cow;
 use std::path::Path;
 
-use chrono::{DateTime, Utc, NaiveDateTime};
-use rusqlite::{Connection, params, Rows, ToSql};
-use sequoia_openpgp::Cert;
+use chrono::{DateTime, NaiveDateTime, Utc};
+use rusqlite::{params, Connection, Rows, ToSql};
 use sequoia_openpgp::cert::CertParser;
 use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::serialize::{Serialize, SerializeInto};
+use sequoia_openpgp::Cert;
 
 pub mod sql;
 
-use crate::driver::{SqlDriver, Selector};
-use sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, 
-    ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT, PEERUPDATE};
-use crate::{Result, peer::{Peer, Prefer}, account::Account};
+use crate::driver::{Selector, SqlDriver};
+use crate::{
+    account::Account,
+    peer::{Peer, Prefer},
+    Result,
+};
+use sql::{
+    ACCOUNTGET, ACCOUNTINSERT, ACCOUNTSCHEMA, ACCOUNTUPDATE, PEERGET, PEERINSERT, PEERSCHEMA,
+    PEERUPDATE,
+};
 
 macro_rules! count {
     () => (0usize);
@@ -34,7 +40,7 @@ impl FromSql for Prefer {
         match i {
             0 => Ok(Prefer::Mutual),
             1 => Ok(Prefer::Nopreference),
-            x => Err(FromSqlError::OutOfRange(x))
+            x => Err(FromSqlError::OutOfRange(x)),
         }
     }
 }
@@ -67,22 +73,18 @@ macro_rules! peer_fun {
 }
 
 macro_rules! get_time {
-    ($field:expr) => {
-        {
-            let unix: Option<i64> = $field?;
-            let ts: Option<DateTime<Utc>> = if let Some(unix) = unix {
-                let nt = NaiveDateTime::from_timestamp_opt(unix, 0).ok_or_else(||
-                    anyhow::anyhow!(
-                        "Couldn't parse timestamp")
-                )?;
-                let dt = DateTime::<Utc>::from_utc(nt, Utc);
-                Some(dt)
-            } else {
-                None
-            };
-            ts
-        }
-    }
+    ($field:expr) => {{
+        let unix: Option<i64> = $field?;
+        let ts: Option<DateTime<Utc>> = if let Some(unix) = unix {
+            let nt = NaiveDateTime::from_timestamp_opt(unix, 0)
+                .ok_or_else(|| anyhow::anyhow!("Couldn't parse timestamp"))?;
+            let dt = DateTime::<Utc>::from_utc(nt, Utc);
+            Some(dt)
+        } else {
+            None
+        };
+        ts
+    }};
 }
 
 pub struct SqliteDriver {
@@ -91,7 +93,8 @@ pub struct SqliteDriver {
 
 impl SqliteDriver {
     pub fn new<P>(path: P) -> Result<Self>
-        where P: AsRef<Path>
+    where
+        P: AsRef<Path>,
     {
         let conn = Connection::open(path)?;
         Ok(SqliteDriver { conn })
@@ -99,7 +102,7 @@ impl SqliteDriver {
 
     pub fn setup(&self) -> Result<()> {
         // we create all fields even if we
-        // don't use prefer and enable 
+        // don't use prefer and enable
         // unless account-settings is enabled
         // is enabled
         self.conn.execute(ACCOUNTSCHEMA, [])?;
@@ -113,18 +116,17 @@ impl SqliteDriver {
             let mail: String = row.get(0)?;
             let unix: i64 = row.get(1)?;
             let last_seen: DateTime<Utc> = {
-                let nt = NaiveDateTime::from_timestamp_opt(unix, 0).ok_or_else(||
-                    anyhow::anyhow!(
-                        "Couldn't parse timestamp")
-                )?;
+                let nt = NaiveDateTime::from_timestamp_opt(unix, 0)
+                    .ok_or_else(|| anyhow::anyhow!("Couldn't parse timestamp"))?;
                 DateTime::<Utc>::from_utc(nt, Utc)
             };
 
             let timestamp = get_time!(row.get(2));
             let keystr: Option<String> = row.get(3)?;
             let key: Option<Cow<Cert>> = if let Some(keystr) = keystr {
-                CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok())
-                .map(Cow::Owned)
+                CertParser::from_reader(keystr.as_bytes())?
+                    .find_map(|cert| cert.ok())
+                    .map(Cow::Owned)
             } else {
                 None
             };
@@ -132,8 +134,9 @@ impl SqliteDriver {
             let gossip_timestamp = get_time!(row.get(4));
             let gossip_keystr: Option<String> = row.get(5)?;
             let gossip_key: Option<Cow<Cert>> = if let Some(keystr) = gossip_keystr {
-                CertParser::from_reader(keystr.as_bytes())?.find_map(|cert| cert.ok())
-                .map(Cow::Owned)
+                CertParser::from_reader(keystr.as_bytes())?
+                    .find_map(|cert| cert.ok())
+                    .map(Cow::Owned)
             } else {
                 None
             };
@@ -149,9 +152,9 @@ impl SqliteDriver {
                 gossip_timestamp,
                 gossip_cert: gossip_key,
                 prefer,
-            })
+            });
         }
-        return Err(anyhow::anyhow!("No Peer found"));
+        Err(anyhow::anyhow!("No Peer found"))
     }
 }
 
@@ -159,9 +162,7 @@ impl SqlDriver for SqliteDriver {
     fn get_account(&self, canonicalized_mail: &str) -> Result<Account> {
         let mut selectstmt = self.conn.prepare(ACCOUNTGET)?;
 
-        let mut rows = selectstmt.query(params![
-            canonicalized_mail
-        ])?;
+        let mut rows = selectstmt.query(params![canonicalized_mail])?;
 
         if let Some(row) = rows.next()? {
             let mail: String = row.get(0)?;
@@ -179,9 +180,9 @@ impl SqlDriver for SqliteDriver {
                 cert,
                 prefer,
                 enable,
-            })
+            });
         }
-        return Err(anyhow::anyhow!("No Account found"));
+        Err(anyhow::anyhow!("No Account found"))
     }
 
     fn insert_account(&self, account: &Account) -> Result<()> {
@@ -190,12 +191,10 @@ impl SqlDriver for SqliteDriver {
         let certstr = std::str::from_utf8(output)?;
 
         // should we insert the rev cert into the db too?
-        self.conn.execute(ACCOUNTINSERT, params![
-            &account.mail, 
-            &certstr,
-            account.prefer,
-            &account.enable,
-        ])?;
+        self.conn.execute(
+            ACCOUNTINSERT,
+            params![&account.mail, &certstr, account.prefer, &account.enable,],
+        )?;
         Ok(())
     }
 
@@ -204,67 +203,63 @@ impl SqlDriver for SqliteDriver {
         account.cert.as_tsk().armored().serialize(output)?;
         let certstr = std::str::from_utf8(output)?;
 
-        let prefer: Prefer = account.prefer.into();
-
-        self.conn.execute(ACCOUNTUPDATE, params![
-            &certstr,
-            prefer,
-            &account.enable,
-            &account.mail, 
-        ])?;
+        self.conn.execute(
+            ACCOUNTUPDATE,
+            params![&certstr, account.prefer, &account.enable, &account.mail,],
+        )?;
         Ok(())
     }
 
     fn delete_account(&self, canonicalized_mail: &str, transfer: Option<&str>) -> Result<()> {
         if let Some(transfer) = transfer {
-            let peers = 
-                "UPDATE autocrypt_peer SET
+            let peers = "UPDATE autocrypt_peer SET
                 account = ?1,
                 WHERE account = ?2";
-            self.conn.execute(peers, params![
-                transfer,
-                canonicalized_mail
-            ])?;
+            self.conn
+                .execute(peers, params![transfer, canonicalized_mail])?;
         } else {
-            let peers = 
-                "DELETE FROM autocrypt_peer
+            let peers = "DELETE FROM autocrypt_peer
                 WHERE account = ?";
             self.conn.execute(peers, params![canonicalized_mail])?;
         }
 
-        let accountdelete = 
-            "DELETE FROM autocrypt_account 
+        let accountdelete = "DELETE FROM autocrypt_account 
             WHERE address = ?;";
 
-        self.conn.execute(accountdelete, params![&canonicalized_mail])?;
+        self.conn
+            .execute(accountdelete, params![&canonicalized_mail])?;
         Ok(())
     }
 
     fn get_peer(&self, account_mail: Option<&str>, selector: Selector) -> Result<Peer> {
-
         match selector {
-            Selector::Email(mail) =>
-                peer_fun!(self, account_mail, "address = ?1", mail), 
-            Selector::Fpr(fpr) => 
-                peer_fun!(self, account_mail, "(key_fpr = ?1 or gossip_key_fpr = ?1)",
-                fpr.to_hex()),
-            Selector::KeyID(key_id) => 
-                peer_fun!(self, account_mail, "(key_keyid = ?1 or gossip_key_keiid = ?1)",
-                key_id.to_hex())
+            Selector::Email(mail) => peer_fun!(self, account_mail, "address = ?1", mail),
+            Selector::Fpr(fpr) => peer_fun!(
+                self,
+                account_mail,
+                "(key_fpr = ?1 or gossip_key_fpr = ?1)",
+                fpr.to_hex()
+            ),
+            Selector::KeyID(key_id) => peer_fun!(
+                self,
+                account_mail,
+                "(key_keyid = ?1 or gossip_key_keiid = ?1)",
+                key_id.to_hex()
+            ),
         }
     }
 
     fn delete_peer(&self, account_mail: Option<&str>, canonicalized_mail: &str) -> Result<()> {
         if let Some(account_mail) = account_mail {
-            let accountdelete = 
-                "DELETE FROM autocrypt_peer
+            let accountdelete = "DELETE FROM autocrypt_peer
                 WHERE account = ? and address = ?;";
-            self.conn.execute(accountdelete, params![account_mail, canonicalized_mail])?;
+            self.conn
+                .execute(accountdelete, params![account_mail, canonicalized_mail])?;
         } else {
-            let accountdelete = 
-                "DELETE FROM autocrypt_peer
+            let accountdelete = "DELETE FROM autocrypt_peer
                 WHERE address = ?;";
-            self.conn.execute(accountdelete, params![canonicalized_mail])?;
+            self.conn
+                .execute(accountdelete, params![canonicalized_mail])?;
         }
         Ok(())
     }
@@ -272,43 +267,54 @@ impl SqlDriver for SqliteDriver {
     fn insert_peer(&self, peer: &Peer) -> Result<()> {
         let keystr = if let Some(ref key) = peer.cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
-        } else { None };
+        } else {
+            None
+        };
         let keystr_fpr = peer.cert.as_ref().map(|c| c.fingerprint().to_hex());
         let keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
         let gossip_keystr = if let Some(ref key) = peer.gossip_cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
-        } else { None};
+        } else {
+            None
+        };
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
         let gossip_keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
-        self.conn.execute(PEERINSERT, params![
-            &peer.mail, 
-            &peer.last_seen.timestamp(),
-            &peer.timestamp.map(|t| t.timestamp()),
-            &keystr,
-            &keystr_fpr,
-            &keystr_id,
-            &peer.gossip_timestamp.map(|t| t.timestamp()),
-            &gossip_keystr,
-            &gossip_keystr_fpr,
-            &gossip_keystr_id,
-            peer.prefer,
-            &peer.account,
-        ])?;
+        self.conn.execute(
+            PEERINSERT,
+            params![
+                &peer.mail,
+                &peer.last_seen.timestamp(),
+                &peer.timestamp.map(|t| t.timestamp()),
+                &keystr,
+                &keystr_fpr,
+                &keystr_id,
+                &peer.gossip_timestamp.map(|t| t.timestamp()),
+                &gossip_keystr,
+                &gossip_keystr_fpr,
+                &gossip_keystr_id,
+                peer.prefer,
+                &peer.account,
+            ],
+        )?;
         Ok(())
     }
 
     fn update_peer(&self, peer: &Peer, wildmode: bool) -> Result<()> {
         let keystr = if let Some(ref key) = peer.cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
-        } else { None };
+        } else {
+            None
+        };
         let keystr_fpr = peer.cert.as_ref().map(|c| c.fingerprint().to_hex());
         let keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
         let gossip_keystr = if let Some(ref key) = peer.gossip_cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
-        } else { None};
+        } else {
+            None
+        };
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
         let gossip_keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
@@ -319,20 +325,23 @@ impl SqlDriver for SqliteDriver {
             format!("{} WHERE address = ?12 and account = ?11;", PEERUPDATE)
         };
 
-        self.conn.execute(&insertstmt, params![
-            &peer.last_seen.timestamp(),
-            &peer.timestamp.map(|t| t.timestamp()),
-            &keystr,
-            &keystr_fpr,
-            &keystr_id,
-            &peer.gossip_timestamp.map(|t| t.timestamp()),
-            &gossip_keystr,
-            &gossip_keystr_fpr,
-            &gossip_keystr_id,
-            peer.prefer,
-            &peer.account,
-            &peer.mail, 
-        ])?;
+        self.conn.execute(
+            &insertstmt,
+            params![
+                &peer.last_seen.timestamp(),
+                &peer.timestamp.map(|t| t.timestamp()),
+                &keystr,
+                &keystr_fpr,
+                &keystr_id,
+                &peer.gossip_timestamp.map(|t| t.timestamp()),
+                &gossip_keystr,
+                &gossip_keystr_fpr,
+                &gossip_keystr_id,
+                peer.prefer,
+                &peer.account,
+                &peer.mail,
+            ],
+        )?;
         Ok(())
     }
 }

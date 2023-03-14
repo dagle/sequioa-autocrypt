@@ -1,5 +1,5 @@
-use sequoia_openpgp::Cert;
 use crate::peer::Prefer;
+use sequoia_openpgp::Cert;
 
 #[derive(PartialEq, Debug)]
 pub struct Account {
@@ -15,6 +15,11 @@ pub struct Account {
 
 impl Account {
     pub(crate) fn new(mail: &str, cert: Cert) -> Self {
-        Account { mail: mail.to_owned(), cert, prefer: Prefer::Nopreference, enable: false }
+        Account {
+            mail: mail.to_owned(),
+            cert,
+            prefer: Prefer::Nopreference,
+            enable: false,
+        }
     }
 }

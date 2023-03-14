@@ -4,11 +4,11 @@
 // autocrypt focuses on sending encrypted messages between MUA's
 // and not signing clear text messages.
 
-pub mod sq;
-pub mod peer;
-pub mod store;
-pub mod driver;
 pub mod account;
+pub mod driver;
+pub mod peer;
+pub mod sq;
+pub mod store;
 
 #[cfg(feature = "rusqlite")]
 pub mod rusqlite;
@@ -19,7 +19,7 @@ pub fn canonicalize(email: &str) -> Option<String> {
     let at = email.find('@')?;
     let username = &email[..at];
     let lower = username.to_lowercase();
-    let domain = &email[at+1..];
+    let domain = &email[at + 1..];
     let idn = idna::domain_to_ascii(domain).ok()?;
     Some(format!("{}@{}", lower, idn))
 }
@@ -27,7 +27,7 @@ pub fn canonicalize(email: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::canonicalize;
-    
+
     #[test]
     fn tolower() {
         let email = "art.vandelay@vandelayindustries.com";

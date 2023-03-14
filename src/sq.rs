@@ -1,16 +1,16 @@
 extern crate sequoia_openpgp as openpgp;
-use std::collections::HashMap;
-use openpgp::packet::prelude::SecretKeyMaterial;
-use openpgp::parse::stream::{VerificationHelper, MessageStructure, DecryptionHelper};
-use openpgp::{Cert, KeyID, Fingerprint, crypto, Packet};
-use openpgp::crypto::{Password, Decryptor};
-use openpgp::fmt::hex;
-use openpgp::packet::{key, Key, PKESK};
-use openpgp::policy::Policy;
-use openpgp::types::{SymmetricAlgorithm, PublicKeyAlgorithm};
 use crate::driver::SqlDriver;
 use crate::store::AutocryptStore;
 use crate::Result;
+use openpgp::crypto::{Decryptor, Password};
+use openpgp::fmt::hex;
+use openpgp::packet::prelude::SecretKeyMaterial;
+use openpgp::packet::{key, Key, PKESK};
+use openpgp::parse::stream::{DecryptionHelper, MessageStructure, VerificationHelper};
+use openpgp::policy::Policy;
+use openpgp::types::{PublicKeyAlgorithm, SymmetricAlgorithm};
+use openpgp::{crypto, Cert, Fingerprint, KeyID, Packet};
+use std::collections::HashMap;
 
 // We pair a session key with the algorithm for easier access.
 #[derive(Debug, Clone)]
@@ -44,41 +44,6 @@ impl std::str::FromStr for SessionKey {
     }
 }
 
-pub struct VHelper<'a, T: SqlDriver> {
-    ctx: &'a AutocryptStore<T>,
-    account_email: Option<&'a str>,
-}
-
-impl<'a, T: SqlDriver> VHelper<'a, T> {
-    pub fn new(ctx: &'a AutocryptStore<T>, account_email: Option<&'a str>)
-           -> Self {
-        VHelper {
-            ctx,
-            account_email,
-        }
-    }
-}
-
-impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T> {
-    /// Get keys from the db, we get both keys and gossip_keys
-    /// matching the fingerprint and keyid
-    fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
-        let mut certs = Vec::new();
-        for id in _ids {
-            if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, id.into()) {
-                if let Some(c) = peer.cert { certs.push(c.into_owned()) }
-                if let Some(c) = peer.gossip_cert { certs.push(c.into_owned()) }
-            }
-        }
-        Ok(certs)
-    }
-
-    fn check(&mut self, _structure: MessageStructure) -> Result<()> {
-        // TODO: Save the result
-        Ok(())
-    }
-}
-
 /// Since the key can be locked or unlocked we use this abstraction
 struct PrivateKey {
     key: Key<key::SecretParts, key::UnspecifiedRole>,
@@ -86,7 +51,7 @@ struct PrivateKey {
 
 impl PrivateKey {
     fn new(key: Key<key::SecretParts, key::UnspecifiedRole>) -> Self {
-        Self { key } 
+        Self { key }
     }
 
     fn pk_algo(&self) -> PublicKeyAlgorithm {
@@ -98,7 +63,7 @@ impl PrivateKey {
             let algo = self.key.pk_algo();
             self.key.secret_mut().decrypt_in_place(algo, p)?;
             let keypair = self.key.clone().into_keypair()?;
-            return Ok(Box::new(keypair))
+            return Ok(Box::new(keypair));
         }
         Err(anyhow::anyhow!("Key is encrypted but no password supplied"))
     }
@@ -115,62 +80,91 @@ impl PrivateKey {
     }
 }
 
-// pub(crate) fn change_password(cert: Cert, old: &Password, new: &Password) -> Result<Cert> {
-//     let open = remove_password(cert, old)?;
-//     set_password(open, new)
-// }
-
-// Decrypts a key, if possible.
 pub(crate) fn remove_password(cert: Cert, password: &Password) -> Result<Cert> {
-
-    // let mut decrypted: Vec<Packet> = Vec::new();
     let mut decrypted: Vec<Packet> = vec![decrypt_key(
         cert.primary_key().key().clone().parts_into_secret()?,
         password,
-    )?.into()];
+    )?
+    .into()];
 
     for ka in cert.keys().subkeys().secret() {
-        decrypted.push(decrypt_key(
-                ka.key().clone().parts_into_secret()?,
-                password)?.into());
+        decrypted.push(decrypt_key(ka.key().clone().parts_into_secret()?, password)?.into());
     }
 
     cert.insert_packets(decrypted)
 }
 
 pub(crate) fn set_password(cert: Cert, password: &Password) -> Result<Cert> {
-    let mut encrypted: Vec<Packet> = vec![
-        cert.primary_key().key().clone().parts_into_secret()?
-            .encrypt_secret(password)?.into()
-    ];
+    let mut encrypted: Vec<Packet> = vec![cert
+        .primary_key()
+        .key()
+        .clone()
+        .parts_into_secret()?
+        .encrypt_secret(password)?
+        .into()];
     for ka in cert.keys().subkeys().unencrypted_secret() {
         encrypted.push(
-            ka.key().clone().parts_into_secret()?
-            .encrypt_secret(password)?.into());
-            }
+            ka.key()
+                .clone()
+                .parts_into_secret()?
+                .encrypt_secret(password)?
+                .into(),
+        );
+    }
     cert.insert_packets(encrypted)
 }
 
-// Decrypts a key, if possible.
-pub fn decrypt_key<R>(key: Key<key::SecretParts, R>, password: &Password)
-    -> Result<Key<key::SecretParts, R>>
-    where R: key::KeyRole + Clone
+pub fn decrypt_key<R>(
+    key: Key<key::SecretParts, R>,
+    password: &Password,
+) -> Result<Key<key::SecretParts, R>>
+where
+    R: key::KeyRole + Clone,
 {
     let key = key.parts_as_secret()?;
     match key.secret() {
-        SecretKeyMaterial::Unencrypted(_) => {
-            Ok(key.clone())
-        }
+        SecretKeyMaterial::Unencrypted(_) => Ok(key.clone()),
         SecretKeyMaterial::Encrypted(_) => {
-            // for p in password.iter() {
-                if let Ok(key)
-                    = key.clone().decrypt_secret(&password)
-                {
-                    return Ok(key);
-                }
-                Err(anyhow::anyhow!("Password isn't correct"))
-            // }
+            if let Ok(key) = key.clone().decrypt_secret(password) {
+                return Ok(key);
+            }
+            Err(anyhow::anyhow!("Password isn't correct"))
         }
+    }
+}
+
+pub struct VHelper<'a, T: SqlDriver> {
+    ctx: &'a AutocryptStore<T>,
+    account_email: Option<&'a str>,
+}
+
+impl<'a, T: SqlDriver> VHelper<'a, T> {
+    pub fn new(ctx: &'a AutocryptStore<T>, account_email: Option<&'a str>) -> Self {
+        VHelper { ctx, account_email }
+    }
+}
+
+impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T> {
+    /// Get keys from the db, we get both keys and gossip_keys
+    /// matching the fingerprint and keyid
+    fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
+        let mut certs = Vec::new();
+        for id in _ids {
+            if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, id.into()) {
+                if let Some(c) = peer.cert {
+                    certs.push(c.into_owned())
+                }
+                if let Some(c) = peer.gossip_cert {
+                    certs.push(c.into_owned())
+                }
+            }
+        }
+        Ok(certs)
+    }
+
+    fn check(&mut self, _structure: MessageStructure) -> Result<()> {
+        // TODO: Save the result
+        Ok(())
     }
 }
 
@@ -184,20 +178,26 @@ pub struct DHelper<'a, T: SqlDriver> {
 }
 
 impl<'a, T: SqlDriver> DHelper<'a, T> {
-    pub fn new(ctx: &'a AutocryptStore<T>, policy: &dyn Policy, account_mail: Option<&'a str>,
-        cert: Cert, sk: Option<SessionKey>) -> Self {
+    pub fn new(
+        ctx: &'a AutocryptStore<T>,
+        policy: &dyn Policy,
+        account_mail: Option<&'a str>,
+        cert: Cert,
+        sk: Option<SessionKey>,
+    ) -> Self {
         let mut keys: HashMap<KeyID, PrivateKey> = HashMap::new();
 
-        for key in cert.keys()
+        for key in cert
+            .keys()
             .with_policy(policy, None)
-                .supported()
-                .for_transport_encryption()
-                {
-                    if let Ok(key) = key.parts_as_secret() {
-                        let id: KeyID = key.key().keyid();
-                        keys.insert(id, PrivateKey::new(key.key().clone()));
-                    }
-                }
+            .supported()
+            .for_transport_encryption()
+        {
+            if let Ok(key) = key.parts_as_secret() {
+                let id: KeyID = key.key().keyid();
+                keys.insert(id, PrivateKey::new(key.key().clone()));
+            }
+        }
         DHelper {
             ctx,
             sk,
@@ -220,18 +220,29 @@ impl<'a, T: SqlDriver> VerificationHelper for DHelper<'a, T> {
 }
 
 impl<'a, T: SqlDriver> DHelper<'a, T> {
-    fn try_decrypt<D>(&self, pkesk: &PKESK,
-                      sym_algo: Option<SymmetricAlgorithm>,
-                      _pk_algo: PublicKeyAlgorithm,
-                      mut keypair: Box<dyn crypto::Decryptor>,
-                      decrypt: &mut D)
-                      -> bool
-        where D: FnMut(SymmetricAlgorithm, &openpgp::crypto::SessionKey) -> bool
+    fn try_decrypt<D>(
+        &self,
+        pkesk: &PKESK,
+        sym_algo: Option<SymmetricAlgorithm>,
+        _pk_algo: PublicKeyAlgorithm,
+        mut keypair: Box<dyn crypto::Decryptor>,
+        decrypt: &mut D,
+    ) -> bool
+    where
+        D: FnMut(SymmetricAlgorithm, &openpgp::crypto::SessionKey) -> bool,
     {
-        pkesk.decrypt(&mut *keypair, sym_algo)
-            .and_then(|(algo, sk)| {
-                if decrypt(algo, &sk) { Some(sk) } else { None }
-            }).is_some()
+        pkesk
+            .decrypt(&mut *keypair, sym_algo)
+            .and_then(
+                |(algo, sk)| {
+                    if decrypt(algo, &sk) {
+                        Some(sk)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .is_some()
         // TODO: match on the result and save something
     }
 }
@@ -239,15 +250,16 @@ impl<'a, T: SqlDriver> DHelper<'a, T> {
 impl<'a, T: SqlDriver> DecryptionHelper for DHelper<'a, T> {
     // We don't use the skesks because we know that the key should be
     // a pkesk with autoencrypt, since it only allows those kind of encryptions.
-    fn decrypt<D>(&mut self,
+    fn decrypt<D>(
+        &mut self,
         pkesks: &[openpgp::packet::PKESK],
         _skesks: &[openpgp::packet::SKESK],
         sym_algo: Option<SymmetricAlgorithm>,
-        mut decrypt: D)
-        -> openpgp::Result<Option<openpgp::Fingerprint>>
-            where D: FnMut(SymmetricAlgorithm, &openpgp::crypto::SessionKey) -> bool
+        mut decrypt: D,
+    ) -> openpgp::Result<Option<openpgp::Fingerprint>>
+    where
+        D: FnMut(SymmetricAlgorithm, &openpgp::crypto::SessionKey) -> bool,
     {
-
         // Maybe do sk, if it speed things up?
         if let Some(sk) = &self.sk {
             let decrypted = if let Some(sa) = sk.symmetric_algo {
@@ -291,7 +303,7 @@ impl<'a, T: SqlDriver> DecryptionHelper for DHelper<'a, T> {
                 let algo = key.pk_algo();
                 if let Some(d) = key.get_unlock() {
                     if self.try_decrypt(pkesk, sym_algo, algo, d, &mut decrypt) {
-                        return Ok(Some(self.fp.clone()))
+                        return Ok(Some(self.fp.clone()));
                     }
                 }
             }
@@ -300,7 +312,7 @@ impl<'a, T: SqlDriver> DecryptionHelper for DHelper<'a, T> {
         for pkesk in pkesks {
             // Don't ask the user to decrypt a key if we don't support
             // the algorithm.
-            if ! pkesk.pk_algo().is_supported() {
+            if !pkesk.pk_algo().is_supported() {
                 continue;
             }
 
@@ -311,13 +323,11 @@ impl<'a, T: SqlDriver> DecryptionHelper for DHelper<'a, T> {
                 }
                 if let Ok(decryptor) = key.unlock(&self.ctx.password) {
                     let algo = key.pk_algo();
-                    if self.try_decrypt(pkesk, sym_algo, algo, decryptor,
-                            &mut decrypt)
-                    {
+                    if self.try_decrypt(pkesk, sym_algo, algo, decryptor, &mut decrypt) {
                         return Ok(Some(self.fp.clone()));
                     }
                 } else {
-                    return Err(anyhow::anyhow!("Password is wrong for our key"))
+                    return Err(anyhow::anyhow!("Password is wrong for our key"));
                 }
             }
         }

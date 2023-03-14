@@ -1,9 +1,13 @@
-use std::env::current_dir;
-use chrono::Utc;
-use acs::rusqlite::SqliteDriver;
-use sequoia_openpgp::{policy::{StandardPolicy, Policy}, cert::CertParser, parse::Parse};
-use sequoia_autocrypt_store as acs;
 use crate::acs::{canonicalize, peer::Prefer, store::AutocryptStore};
+use acs::rusqlite::SqliteDriver;
+use chrono::Utc;
+use sequoia_autocrypt_store as acs;
+use sequoia_openpgp::{
+    cert::CertParser,
+    parse::Parse,
+    policy::{Policy, StandardPolicy},
+};
+use std::env::current_dir;
 
 pub type Result<T> = ::std::result::Result<T, anyhow::Error>;
 
@@ -37,7 +41,8 @@ fn parsed_email(ac: &AutocryptStore<SqliteDriver>) -> Result<()> {
         =vZ8Y
         -----END PGP PUBLIC KEY BLOCK-----"#;
 
-    let cert = CertParser::from_reader(pubkey.as_bytes())?.find_map(|cert| cert.ok())
+    let cert = CertParser::from_reader(pubkey.as_bytes())?
+        .find_map(|cert| cert.ok())
         .ok_or_else(|| anyhow::anyhow!("No cert found"))?;
 
     // sender, you got from your email parser
@@ -51,24 +56,32 @@ fn parsed_email(ac: &AutocryptStore<SqliteDriver>) -> Result<()> {
 
     // All emails needs to be canonicalize before inserting them into the database
     // or comparisons in the database might fail.
-    let canonicalized_email = canonicalize(address).ok_or_else(||
-        anyhow::anyhow!("Address is the wrong format")
-        )?;
+    let canonicalized_email =
+        canonicalize(address).ok_or_else(|| anyhow::anyhow!("Address is the wrong format"))?;
 
     ac.update_peer(OUR, &canonicalized_email, &cert, prefer, date, false)?;
     Ok(())
 }
 
-pub fn encrypt(ac: &AutocryptStore<SqliteDriver>, policy: &dyn Policy, reciever: &str) -> Result<()> {
+pub fn encrypt(
+    ac: &AutocryptStore<SqliteDriver>,
+    policy: &dyn Policy,
+    reciever: &str,
+) -> Result<()> {
     let msg = "This is my super secret message";
 
     let mut result = Vec::new();
 
-    let reciever_can = canonicalize(reciever).ok_or_else(||
-        anyhow::anyhow!("Address is the wrong format")
-        )?;
+    let reciever_can =
+        canonicalize(reciever).ok_or_else(|| anyhow::anyhow!("Address is the wrong format"))?;
 
-    ac.encrypt(policy, OUR, &[&reciever_can], &mut msg.as_bytes(), &mut result)?;
+    ac.encrypt(
+        policy,
+        OUR,
+        &[&reciever_can],
+        &mut msg.as_bytes(),
+        &mut result,
+    )?;
 
     let encrypted = std::str::from_utf8(&result)?;
 
@@ -106,7 +119,7 @@ pub fn decrypt(ac: &AutocryptStore<SqliteDriver>, policy: &dyn Policy) -> Result
     println!("Decrypted message: {}", decrypted);
 
     Ok(())
-} 
+}
 
 fn main() -> Result<()> {
     // What keys are acceptable?
@@ -114,7 +127,7 @@ fn main() -> Result<()> {
 
     let mut path = current_dir()?;
     path.push("autocrypt.db");
-    
+
     let sqlite = SqliteDriver::new(path)?;
 
     // this function is safe to call multiple times
@@ -134,7 +147,7 @@ fn main() -> Result<()> {
 
     // Try to decrypt an email for us, that has been sent
     // using th
-    decrypt(&ac, &policy)?; 
+    decrypt(&ac, &policy)?;
 
     Ok(())
 }

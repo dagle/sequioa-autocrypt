@@ -1,10 +1,10 @@
-use sequoia_openpgp::{Fingerprint, KeyID, KeyHandle};
-use crate::{Result, peer::Peer, account::Account};
+use crate::{account::Account, peer::Peer, Result};
+use sequoia_openpgp::{Fingerprint, KeyHandle, KeyID};
 
 pub enum Selector<'a> {
     Email(&'a str), // canonicalized_mail email so we compare it
     Fpr(&'a Fingerprint),
-    KeyID(&'a KeyID)
+    KeyID(&'a KeyID),
 }
 
 impl<'a> From<&'a Fingerprint> for Selector<'a> {
@@ -27,7 +27,7 @@ impl<'a> From<&'a str> for Selector<'a> {
 
 impl<'a> From<&'a KeyHandle> for Selector<'a> {
     fn from(value: &'a KeyHandle) -> Self {
-        match  value {
+        match value {
             KeyHandle::Fingerprint(fpr) => Self::Fpr(fpr),
             KeyHandle::KeyID(id) => Self::KeyID(id),
         }
@@ -36,7 +36,7 @@ impl<'a> From<&'a KeyHandle> for Selector<'a> {
 
 /// SqlDriver is crud trait around accounts and peers.
 pub trait SqlDriver {
-    /// Get an account for an email, 
+    /// Get an account for an email,
     /// * `canonicalized_mail` canonicalized address for easier comparisons  
     fn get_account(&self, canonicalized_mail: &str) -> Result<Account>;
 
@@ -49,9 +49,9 @@ pub trait SqlDriver {
     // delete otherwise.
     fn delete_account(&self, canonicalized_mail: &str, transfer: Option<&str>) -> Result<()>;
 
-    /// Get a peer for an email (if it exist), 
+    /// Get a peer for an email (if it exist),
     ///
-    /// * `account_mail` - An address specifying what the account the email peer 
+    /// * `account_mail` - An address specifying what the account the email peer
     /// should belong to. If none, we are running in wildmode and we return peer
     /// independent of account. In wildmode, there should only exist 1 peer with the
     /// same canonicalized_mail (if there is, that is an error), where in strict mode
@@ -67,7 +67,7 @@ pub trait SqlDriver {
     /// this shouldn't happen.
     fn insert_peer(&self, peer: &Peer) -> Result<()>;
 
-    /// Update a peer, 
+    /// Update a peer,
     /// * `wildmode`, if enabled don't look at the account in peer when selecting
     /// what account to update
     fn update_peer(&self, peer: &Peer, wildmode: bool) -> Result<()>;
