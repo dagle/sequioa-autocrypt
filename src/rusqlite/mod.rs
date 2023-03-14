@@ -13,7 +13,8 @@ use sequoia_openpgp::serialize::{Serialize, SerializeInto};
 pub mod sql;
 
 use crate::driver::{SqlDriver, Selector};
-use sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT};
+use sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, 
+    ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT, PEERUPDATE};
 use crate::{Result, peer::{Peer, Prefer}, account::Account};
 
 macro_rules! count {
@@ -311,33 +312,13 @@ impl SqlDriver for SqliteDriver {
 
         // can we do this better?
         let insertstmt = if wildmode {
-            "UPDATE autocrypt_peer SET 
-                last_seen = ?1,
-                timestamp = ?2,
-                key = ?3,
-                key_fpr = ?4,
-                gossip_timestamp = ?5,
-                gossip_key = ?6,
-                gossip_key_fpr = ?7,
-                prefer = ?8,
-                account = ?9
-            WHERE address = ?10 and account = ?9"
+            format!("{} WHERE address = ?10;", PEERUPDATE)
         } else {
-            "UPDATE autocrypt_peer SET 
-                last_seen = ?1,
-                timestamp = ?2,
-                key = ?3,
-                key_fpr = ?4,
-                gossip_timestamp = ?5,
-                gossip_key = ?6,
-                gossip_key_fpr = ?7,
-                prefer = ?8,
-                account = ?9
-            WHERE address = ?10"
+            format!("{} WHERE address = ?10 and account = ?9;", PEERUPDATE)
         };
 
         let prefer: Prefer = peer.prefer.into();
-        self.conn.execute(insertstmt, params![
+        self.conn.execute(&insertstmt, params![
             &peer.last_seen.timestamp(),
             &peer.timestamp.map(|t| t.timestamp()),
             &keystr,

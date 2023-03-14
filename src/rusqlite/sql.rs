@@ -74,8 +74,7 @@ pub const PEERUPDATE: &str =
     gossip_key = ?6,
     gossip_key_fpr = ?7,
     prefer = ?8,
-    account = ?9
-WHERE address = ?10";
+    account = ?9";
 
 pub const PEERGET: &str = 
 "SELECT
