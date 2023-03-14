@@ -189,13 +189,11 @@ impl SqlDriver for SqliteDriver {
         account.cert.as_tsk().armored().serialize(output)?;
         let certstr = std::str::from_utf8(output)?;
 
-        let prefer: Prefer = account.prefer.into();
-
         // should we insert the rev cert into the db too?
         self.conn.execute(ACCOUNTINSERT, params![
             &account.mail, 
             &certstr,
-            prefer,
+            account.prefer,
             &account.enable,
         ])?;
         Ok(())
@@ -276,13 +274,13 @@ impl SqlDriver for SqliteDriver {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None };
         let keystr_fpr = peer.cert.as_ref().map(|c| c.fingerprint().to_hex());
+        let keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
         let gossip_keystr = if let Some(ref key) = peer.gossip_cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None};
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
-
-        let prefer: Prefer = peer.prefer.into();
+        let gossip_keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
         self.conn.execute(PEERINSERT, params![
             &peer.mail, 
@@ -290,10 +288,12 @@ impl SqlDriver for SqliteDriver {
             &peer.timestamp.map(|t| t.timestamp()),
             &keystr,
             &keystr_fpr,
+            &keystr_id,
             &peer.gossip_timestamp.map(|t| t.timestamp()),
             &gossip_keystr,
             &gossip_keystr_fpr,
-            prefer,
+            &gossip_keystr_id,
+            peer.prefer,
             &peer.account,
         ])?;
         Ok(())
@@ -304,31 +304,33 @@ impl SqlDriver for SqliteDriver {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None };
         let keystr_fpr = peer.cert.as_ref().map(|c| c.fingerprint().to_hex());
+        let keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
         let gossip_keystr = if let Some(ref key) = peer.gossip_cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else { None};
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
+        let gossip_keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
         // can we do this better?
         let insertstmt = if wildmode {
-            format!("{} WHERE address = ?10;", PEERUPDATE)
+            format!("{} WHERE address = ?12;", PEERUPDATE)
         } else {
-            format!("{} WHERE address = ?10 and account = ?9;", PEERUPDATE)
+            format!("{} WHERE address = ?12 and account = ?11;", PEERUPDATE)
         };
 
-        let prefer: Prefer = peer.prefer.into();
         self.conn.execute(&insertstmt, params![
             &peer.last_seen.timestamp(),
             &peer.timestamp.map(|t| t.timestamp()),
             &keystr,
             &keystr_fpr,
+            &keystr_id,
             &peer.gossip_timestamp.map(|t| t.timestamp()),
             &gossip_keystr,
             &gossip_keystr_fpr,
-            prefer,
+            &gossip_keystr_id,
+            peer.prefer,
             &peer.account,
-
             &peer.mail, 
         ])?;
         Ok(())

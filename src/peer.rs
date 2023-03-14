@@ -3,7 +3,6 @@ use std::borrow::Cow;
 
 use chrono::{DateTime, Utc};
 use openpgp::{Cert, policy::Policy, serialize::stream::Recipient};
-// use rusqlite::{ToSql, types::{ToSqlOutput, Value, FromSql, FromSqlError}};
 use crate::Result;
 
 // we try to to get an encryption key for the specific field
@@ -19,6 +18,7 @@ macro_rules! encrypt_key {
     }
 }
 
+/// Do we and/or peers prefer encrypted emails or cleartext emails.
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub enum Prefer {
     Mutual,
@@ -43,23 +43,6 @@ impl From<Prefer> for Option<&str> {
         }
     }
 }
-
-// impl ToSql for Prefer {
-//     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-//         Ok(ToSqlOutput::Owned(Value::Integer(*self as i64)))
-//     }
-// }
-//
-// impl FromSql for Prefer {
-//     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-//         let i = i64::column_result(value)?;
-//         match i {
-//             0 => Ok(Prefer::Mutual),
-//             1 => Ok(Prefer::Nopreference),
-//             x => Err(FromSqlError::OutOfRange(x))
-//         }
-//     }
-// }
 
 #[derive(PartialEq, Debug)]
 pub struct Peer<'a> {

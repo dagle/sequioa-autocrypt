@@ -9,13 +9,6 @@ use crate::{Result, peer::{Peer, Prefer}, sq::{SessionKey, remove_password, set_
 use openpgp::packet::prelude::SecretKeyMaterial::{Unencrypted, Encrypted};
 use crate::sq::{DHelper, VHelper};
 
-// TODO:
-// [ ] Return stuff from verify/decrypt
-// [-] Missing generic functions on store
-// -- Remove stuff that shouldn't be public etc
-// A change password function
-// (Per account password?)
-
 /// UIRecommendation represent whether or not we should encrypt an email.
 /// Disable means that we shouldn't try to encrypt because it's likely people
 /// won't be able to read it.
@@ -83,11 +76,11 @@ impl<T: SqlDriver> AutocryptStore<T> {
         self.conn.get_peer(account_mail, selector.into())
     }
 
-    fn gen_cert(&self, canonicalized_mail: &str, now: SystemTime) 
+    fn gen_cert(&self, account_mail: &str, now: SystemTime) 
         -> Result<(Cert, Signature)> {
 
         let mut builder = CertBuilder::new();
-        builder = builder.add_userid(canonicalized_mail);
+        builder = builder.add_userid(account_mail);
         builder = builder.set_creation_time(now);
 
         builder = builder.set_validity_period(None);
@@ -95,8 +88,6 @@ impl<T: SqlDriver> AutocryptStore<T> {
         // builder = builder.set_validity_period(
         //     Some(Duration::new(3 * SECONDS_IN_YEAR, 0))),
 
-        // which one to use?
-        // builder = builder.set_cipher_suite(CipherSuite::RSA4k);
         builder = builder.set_cipher_suite(CipherSuite::Cv25519);
 
         builder = builder.add_signing_subkey();
@@ -112,35 +103,39 @@ impl<T: SqlDriver> AutocryptStore<T> {
         builder.generate()
     }
 
-    pub fn update_private_key(&self, policy: &dyn Policy, canonicalized_mail: &str) -> Result<()> {
+    /// Update the private key the account for our mail. If the current key is
+    /// is still usable, no update is done.
+    pub fn update_private_key(&self, policy: &dyn Policy, account_mail: &str) -> Result<()> {
         let now = SystemTime::now();
 
         // Check if we have a key, if that is the case, check if the key is ok.
-        let account = if let Ok(mut account) = self.conn.get_account(canonicalized_mail) {
+        let account = if let Ok(mut account) = self.conn.get_account(account_mail) {
             if account.cert.primary_key().with_policy(policy, now).is_ok() {
                 return Ok(())
             }
-            let (cert, _) = self.gen_cert(canonicalized_mail, now)?;
+            let (cert, _) = self.gen_cert(account_mail, now)?;
 
             account.cert = cert;
             self.conn.update_account(&account)?;
             account
         } else {
-            let (cert, _) = self.gen_cert(canonicalized_mail, now)?;
+            let (cert, _) = self.gen_cert(account_mail, now)?;
             
-            let account = Account::new(canonicalized_mail, cert);
+            let account = Account::new(account_mail, cert);
             self.conn.insert_account(&account)?;
             account
         };
 
         // We insert our own account into the peers, this is so we can send encrypted emails
         // to our self and use it to make encrypted drafts
-        self._update_peer(canonicalized_mail, canonicalized_mail, &account.cert, 
+        self.update_peer_forceable(account_mail, account_mail, &account.cert, 
             account.prefer, now.into(), false, true)?;
         Ok(())
     }
 
-    pub fn update_last_seen(&self, account_mail: Option<&str>, canonicalized_mail: &str,
+    /// Update the when we last saw this email.
+    /// * `account_mail` - The user account or optional None if we are in wildmode
+    pub fn update_last_seen(&self, account_mail: Option<&str>, peer_mail: &str,
         now: DateTime<Utc>) -> Result<()> {
 
         if now.cmp(&Utc::now()) == Ordering::Greater {
@@ -149,36 +144,40 @@ impl<T: SqlDriver> AutocryptStore<T> {
             ))
         }
 
-        let mut peer = self.peer(account_mail, Selector::Email(canonicalized_mail))?;
+        let mut peer = self.peer(account_mail, peer_mail)?;
 
         peer.last_seen = now;
         
         self.conn.update_peer(&peer, account_mail.is_some())
     }
 
-    pub fn update_peer(&self, account_mail: &str, canonicalized_mail: &str, key: &Cert, 
+    /// Update the peer. If the data is older than what we currently have in the database
+    /// no update is done.
+    pub fn update_peer(&self, account_mail: &str, peer_mail: &str, key: &Cert, 
         prefer: Prefer, effective_date: DateTime<Utc>, gossip: bool) -> Result<bool> {
 
-        self._update_peer(account_mail, canonicalized_mail, key, prefer, effective_date, gossip, false)
+        self.update_peer_forceable(account_mail, peer_mail, key, prefer, effective_date, gossip, false)
     }
 
-    fn _update_peer(&self, account_mail: &str, canonicalized_mail: &str, key: &Cert, 
+    // like update_peer but we can force updates. It's mostly used to install the peer associated
+    // with the account.
+    fn update_peer_forceable(&self, account_mail: &str, peer_mail: &str, key: &Cert, 
         prefer: Prefer, effective_date: DateTime<Utc>, gossip: bool, force: bool) -> Result<bool> {
 
-        if !force && account_mail == canonicalized_mail {
+        if !force && account_mail == peer_mail {
             return Err(anyhow::anyhow!(
                     "Updating the peer for your private key isn't allowed directly."))
         }
 
         let peer = if self.wildmode {
-            self.peer(None, Selector::Email(canonicalized_mail))
+            self.peer(None, Selector::Email(peer_mail))
         } else {
-            self.peer(Some(account_mail), Selector::Email(canonicalized_mail))
+            self.peer(Some(account_mail), Selector::Email(peer_mail))
         };
 
         match peer {
             Err(_) => {
-                let peer = Peer::new(canonicalized_mail, account_mail, effective_date, key, gossip, prefer);
+                let peer = Peer::new(peer_mail, account_mail, effective_date, key, gossip, prefer);
                 self.conn.insert_peer(&peer)?;
                 Ok(true)
             }
@@ -209,9 +208,13 @@ impl<T: SqlDriver> AutocryptStore<T> {
         }
     }
     
-    pub fn recommend(&self, account_mail: Option<&str>, canonicalized_reciever: &str)
+    /// recommend tells the user whether or not it's a good idea to encrypt to a receiver
+    /// this should be called once for each receiver. 
+    /// * `account_mail` - The user account or optional None if we are in wildmode
+    /// * `peer_mail` - Peer we want to check if it's safe to encrypt to.
+    pub fn recommend(&self, account_mail: Option<&str>, peer_mail: &str)
         -> UIRecommendation {
-        if let Ok(peer) = self.peer(account_mail, Selector::Email(canonicalized_reciever)) {
+        if let Ok(peer) = self.peer(account_mail, Selector::Email(peer_mail)) {
             if peer.cert.is_some() {
                 let stale = Utc::now() + Duration::days(35);
                 if stale.cmp(&peer.last_seen) == Ordering::Less {
@@ -226,22 +229,28 @@ impl<T: SqlDriver> AutocryptStore<T> {
         UIRecommendation::Disable
     }
 
-    pub fn header(&self, canonicalized_mail: &str, policy: &dyn Policy, 
+    /// Generate a autocryptheader to be inserted into a email header with our public key.
+    pub fn header(&self, account_mail: &str, policy: &dyn Policy, 
         prefer: Prefer) -> Result<AutocryptHeader> {
-        let account = self.account(canonicalized_mail)?;
+        let account = self.account(account_mail)?;
 
-        AutocryptHeader::new_sender(policy, &account.cert, canonicalized_mail, prefer)
+        AutocryptHeader::new_sender(policy, &account.cert, account_mail, prefer)
     }
 
 
-    pub fn gossip_header(&self, our: Option<&str>, canonicalized_mail: &str,
+    /// Generate a autocryptheader to be inserted into a email header
+    /// with gossip information about peers. Gossip is used to spread keys faster.
+    /// This should be called once for each gossip header we want spread.
+    /// * `account_mail` - The user account or optional None if we are in wildmode
+    /// * `peer_mail` - peer we want to generate gossip for
+    pub fn gossip_header(&self, account_mail: Option<&str>, peer_mail: &str,
         policy: &dyn Policy) -> Result<AutocryptHeader> {
 
-        let peer = self.peer(our, Selector::Email(canonicalized_mail))?;
+        let peer = self.peer(account_mail, Selector::Email(peer_mail))?;
 
         if let Some(ref cert) = peer.cert {
             if let Ok(mut header) = 
-                AutocryptHeader::new_sender(policy, cert, canonicalized_mail, None) {
+                AutocryptHeader::new_sender(policy, cert, peer_mail, None) {
 
                 header.header_type = AutocryptHeaderType::Gossip;
                 return Ok(header)
@@ -249,7 +258,7 @@ impl<T: SqlDriver> AutocryptStore<T> {
         }
         if let Some(ref cert) = peer.gossip_cert {
             if let Ok(mut header) = 
-                AutocryptHeader::new_sender(policy, cert, canonicalized_mail, None) {
+                AutocryptHeader::new_sender(policy, cert, peer_mail, None) {
 
                 header.header_type = AutocryptHeaderType::Gossip;
                 return Ok(header)
@@ -259,8 +268,10 @@ impl<T: SqlDriver> AutocryptStore<T> {
                 "Can't find key to create gossip data"))
     }
 
-    pub fn setup_message(&self, canonicalized_mail: &str) -> Result<AutocryptSetupMessage> {
-        let account = self.account(canonicalized_mail)?;
+    /// Make a setup message. Setup messages are used to transfer your private key 
+    /// from one autocrypt implementation to another. Making it easier to change MUA.
+    pub fn setup_message(&self, account_mail: &str) -> Result<AutocryptSetupMessage> {
+        let account = self.account(account_mail)?;
 
         if let Some(ref password) = self.password {
             let open = remove_password(account.cert, password)?;
@@ -270,7 +281,10 @@ impl<T: SqlDriver> AutocryptStore<T> {
         }
     }
 
-    pub fn install_message(&self, canonicalized_mail: &str, policy: &dyn Policy,
+    /// Install a setup message into the system. If the key is usable we install the key.
+    /// If the account doesn't exist, it's created.
+    /// It doesn't care if the cert is older than the current, it will be overwritten anyways.
+    pub fn install_message(&self, account_mail: &str, policy: &dyn Policy,
         mut message: AutocryptSetupMessageParser, password: &Password) -> Result<()> {
         message.decrypt(password)?;
         let decrypted = message.parse()?;
@@ -283,45 +297,48 @@ impl<T: SqlDriver> AutocryptStore<T> {
             cert = set_password(cert, password)?
         }
 
-        let account = if let Ok(mut account) = self.account(canonicalized_mail) {
+        let account = if let Ok(mut account) = self.account(account_mail) {
             // We don't check which cert is newer etc.
             // We expect the user to know what he/she is doing
             account.cert = cert;
             account
         } else {
-            Account::new(canonicalized_mail, cert)
+            Account::new(account_mail, cert)
         };
         self.conn.update_account(&account)?;
-        self._update_peer(canonicalized_mail, canonicalized_mail, &account.cert, 
+        self.update_peer_forceable(account_mail, account_mail, &account.cert, 
             account.prefer, now.into(), false, true)?;
         Ok(())
     }
 
-    // recipients needs to be a list of canonicalized emails
+    /// Encrypt input
+    /// * `account_mail` - our email address. Used to sign the email and to 
+    /// fetch peers if we're not in wildmode
+    /// * `peers` - email address to the peers we want to send email to.
     pub fn encrypt(&self, policy: &dyn Policy,
-        canonicalized_mail: &str, recipients: &[&str],
+        canonicalized_mail: &str, peers: &[&str],
         input: &mut (dyn Read + Send + Sync), output: &mut (dyn Write + Send + Sync))
         -> Result<()> {
 
-        if recipients.is_empty() {
+        if peers.is_empty() {
             return Err(anyhow::anyhow!(
                     "No recipient"));
         }
-        let mut peers: Vec<Peer> = Vec::new();
+        let mut fetched_peers: Vec<Peer> = Vec::new();
         let message = stream::Message::new(output);
 
         let mut recipient_subkeys: Vec<Recipient> = Vec::new();
         let account = self.account(canonicalized_mail)?;
-        for rep in recipients.iter() {
+        for rep in peers.iter() {
             let peer = if self.wildmode {
                 self.peer(None, Selector::Email(rep))?
             } else {
                 self.peer(Some(canonicalized_mail), Selector::Email(rep))?
             };
-            peers.push(peer);
+            fetched_peers.push(peer);
         }
 
-        for peer in peers.iter() {
+        for peer in fetched_peers.iter() {
             let key = peer.get_recipient(policy)?;
             recipient_subkeys.push(key);
         }
@@ -372,19 +389,23 @@ impl<T: SqlDriver> AutocryptStore<T> {
 
         Ok(())
     }
-    pub fn decrypt<S>(&self, policy: &dyn Policy, canonicalized_mail: &str,
+
+    /// Decrypt input
+    /// * `account_mail` - our email address. Used to decrypt email and to 
+    /// fetch peers for verify signatures, if we're not in wildmode.
+    pub fn decrypt<S>(&self, policy: &dyn Policy, account_mail: &str,
         input: &mut (dyn Read + Send + Sync), output: &mut (dyn Write + Send + Sync),
         sk: S)
         -> Result<()> 
         where  S: Into<Option<SessionKey>>
     {
 
-            let account = self.account(canonicalized_mail)?;
+            let account = self.account(account_mail)?;
 
             let account_mail = if self.wildmode {
                 None
             } else {
-                Some(canonicalized_mail)
+                Some(account_mail)
             };
 
             let helper = DHelper::new(self, policy, account_mail, account.cert, sk.into());
@@ -399,9 +420,14 @@ impl<T: SqlDriver> AutocryptStore<T> {
             Ok(())
     }
 
+    /// Verify an email, since autocrypt is mainly for encrypting/decrypting emails
+    /// and decrypt checks signatures, this function is rarely used.
+    /// * `account_mail` - our email address. Used to decrypt email and to 
+    /// fetch peers for verify signatures, if we're not in wildmode
     pub fn verify(&self, policy: &dyn Policy, account_mail: Option<&str>, input: 
         &mut (dyn io::Read + Send + Sync), sigstream: Option<&mut (dyn io::Read + Send + Sync)>,
         output: Option<&mut (dyn io::Write + Send + Sync)>) -> Result<()> {
+        check_mode!(self, account_mail);
 
         let helper = VHelper::new(self, account_mail);
         let _helper = if let Some(dsig) = sigstream {

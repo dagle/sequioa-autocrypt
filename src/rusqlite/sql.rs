@@ -41,9 +41,11 @@ pub const PEERSCHEMA: &str =
     timestamp INT8,
     key text,
     key_fpr text,
+    key_keyid text,
     gossip_timestamp INT8,
     gossip_key text,
     gossip_key_fpr text,
+    gossip_key_keyid text,
     prefer int,
     account text,
     FOREIGN KEY(account) REFERENCES account(address),
@@ -57,12 +59,14 @@ pub const PEERINSERT: &str =
     timestamp,
     key,
     key_fpr,
+    key_keyid,
     gossip_timestamp,
     gossip_key,
     gossip_key_fpr,
+    gossip_key_keyid,
     prefer,
     account)
-values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 pub const PEERUPDATE: &str =
 "UPDATE autocrypt_peer SET 
@@ -70,11 +74,13 @@ pub const PEERUPDATE: &str =
     timestamp = ?2,
     key = ?3,
     key_fpr = ?4,
-    gossip_timestamp = ?5,
-    gossip_key = ?6,
-    gossip_key_fpr = ?7,
-    prefer = ?8,
-    account = ?9";
+    key_keyid = ?5,
+    gossip_timestamp = ?6,
+    gossip_key = ?7,
+    gossip_key_fpr = ?8,
+    gossip_key_keyid = ?9,
+    prefer = ?10,
+    account = ?11";
 
 pub const PEERGET: &str = 
 "SELECT
