@@ -1,19 +1,7 @@
-[workspace]
-members = [
-    "rusqlite",
-]
-
-[workspace.package]
+[package]
 version = "0.1.0"
 edition = "2021"
 authors = ["Per Odlund <odlund@posteo.net>"]
-
-[package]
-version.workspace = true
-# license.workspace = true
-edition.workspace = true
-authors.workspace = true
-# repository.workspace = true
 name = "sequoia-autocrypt-store"
 
 [dependencies]
@@ -22,10 +10,12 @@ chrono = "0.4.23"
 idna = "0.3.0"
 sequoia-autocrypt = "0.25.0"
 sequoia-openpgp = "1.13.0"
+rusqlite = { version = "0.28.0", features = ["chrono"], optional = true }
 
-[dev-dependencies]
-sequoia-autocrypt-store-rusqlite = { path = "rusqlite" }
+[features]
+default = ["rusqlite"]
+rusqlite = ["dep:rusqlite"]
 
-[[test]]
-name = "rusqlite"
-path = "tests/rusqlite.rs"
+[[example]]
+name = "localstore"
+required-features = ["rusqlite"]

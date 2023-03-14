@@ -1,6 +1,5 @@
 extern crate sequoia_openpgp as openpgp;
 use rusqlite::types::{ToSqlOutput, Value, FromSql, FromSqlError};
-use sequoia_autocrypt_store as acs;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -13,37 +12,29 @@ use sequoia_openpgp::serialize::{Serialize, SerializeInto};
 
 pub mod sql;
 
-use acs::driver::{SqlDriver, Selector};
-use crate::sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT};
-use acs::{Result, peer::{Peer, Prefer}, account::Account};
+use crate::driver::{SqlDriver, Selector};
+use sql::{PEERGET, ACCOUNTSCHEMA, PEERSCHEMA, ACCOUNTGET, ACCOUNTINSERT, ACCOUNTUPDATE, PEERINSERT};
+use crate::{Result, peer::{Peer, Prefer}, account::Account};
 
 macro_rules! count {
     () => (0usize);
     ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
 }
 
-struct SqlitePrefer(Prefer);
-
-impl ToSql for SqlitePrefer {
+impl ToSql for Prefer {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Owned(Value::Integer(self.0 as i64)))
+        Ok(ToSqlOutput::Owned(Value::Integer(*self as i64)))
     }
 }
 
-impl FromSql for SqlitePrefer {
+impl FromSql for Prefer {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
         let i = i64::column_result(value)?;
         match i {
-            0 => Ok(SqlitePrefer(Prefer::Mutual)),
-            1 => Ok(SqlitePrefer(Prefer::Nopreference)),
+            0 => Ok(Prefer::Mutual),
+            1 => Ok(Prefer::Nopreference),
             x => Err(FromSqlError::OutOfRange(x))
         }
-    }
-}
-
-impl From<Prefer> for SqlitePrefer {
-    fn from(value: Prefer) -> Self {
-        SqlitePrefer(value)
     }
 }
 
@@ -94,7 +85,7 @@ macro_rules! get_time {
 }
 
 pub struct SqliteDriver {
-    pub conn: Connection,
+    conn: Connection,
 }
 
 impl SqliteDriver {
@@ -145,7 +136,7 @@ impl SqliteDriver {
             } else {
                 None
             };
-            let prefer: SqlitePrefer = row.get(6)?;
+            let prefer: Prefer = row.get(6)?;
             let account: String = row.get(7)?;
 
             return Ok(Peer {
@@ -156,7 +147,7 @@ impl SqliteDriver {
                 cert: key,
                 gossip_timestamp,
                 gossip_cert: gossip_key,
-                prefer: prefer.0,
+                prefer,
             })
         }
         return Err(anyhow::anyhow!("No Peer found"));
@@ -179,13 +170,13 @@ impl SqlDriver for SqliteDriver {
                 .find_map(|cert| cert.ok())
                 .ok_or(anyhow::anyhow!("No valid key found for account"))?;
 
-            let prefer: SqlitePrefer = row.get(2)?;
+            let prefer: Prefer = row.get(2)?;
             let enable: bool = row.get(3)?;
 
             return Ok(Account {
                 mail,
                 cert,
-                prefer: prefer.0,
+                prefer,
                 enable,
             })
         }
@@ -197,7 +188,7 @@ impl SqlDriver for SqliteDriver {
         account.cert.as_tsk().armored().serialize(output)?;
         let certstr = std::str::from_utf8(output)?;
 
-        let prefer: SqlitePrefer = account.prefer.into();
+        let prefer: Prefer = account.prefer.into();
 
         // should we insert the rev cert into the db too?
         self.conn.execute(ACCOUNTINSERT, params![
@@ -214,7 +205,7 @@ impl SqlDriver for SqliteDriver {
         account.cert.as_tsk().armored().serialize(output)?;
         let certstr = std::str::from_utf8(output)?;
 
-        let prefer: SqlitePrefer = account.prefer.into();
+        let prefer: Prefer = account.prefer.into();
 
         self.conn.execute(ACCOUNTUPDATE, params![
             &certstr,
@@ -290,7 +281,7 @@ impl SqlDriver for SqliteDriver {
         } else { None};
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
 
-        let prefer: SqlitePrefer = peer.prefer.into();
+        let prefer: Prefer = peer.prefer.into();
 
         self.conn.execute(PEERINSERT, params![
             &peer.mail, 
@@ -345,7 +336,7 @@ impl SqlDriver for SqliteDriver {
             WHERE address = ?10"
         };
 
-        let prefer: SqlitePrefer = peer.prefer.into();
+        let prefer: Prefer = peer.prefer.into();
         self.conn.execute(insertstmt, params![
             &peer.last_seen.timestamp(),
             &peer.timestamp.map(|t| t.timestamp()),

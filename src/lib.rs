@@ -10,6 +10,9 @@ pub mod store;
 pub mod driver;
 pub mod account;
 
+#[cfg(feature = "rusqlite")]
+pub mod rusqlite;
+
 pub type Result<T> = sequoia_openpgp::Result<T>;
 
 pub fn canonicalize(email: &str) -> Option<String> {

@@ -1,7 +1,8 @@
 extern crate sequoia_openpgp as openpgp;
 use std::collections::HashMap;
+use openpgp::packet::prelude::SecretKeyMaterial;
 use openpgp::parse::stream::{VerificationHelper, MessageStructure, DecryptionHelper};
-use openpgp::{Cert, KeyID, Fingerprint, crypto};
+use openpgp::{Cert, KeyID, Fingerprint, crypto, Packet};
 use openpgp::crypto::{Password, Decryptor};
 use openpgp::fmt::hex;
 use openpgp::packet::{key, Key, PKESK};
@@ -110,6 +111,65 @@ impl PrivateKey {
             // have already checked for that
             let keypair = self.key.clone().into_keypair().unwrap();
             Some(Box::new(keypair))
+        }
+    }
+}
+
+// pub(crate) fn change_password(cert: Cert, old: &Password, new: &Password) -> Result<Cert> {
+//     let open = remove_password(cert, old)?;
+//     set_password(open, new)
+// }
+
+// Decrypts a key, if possible.
+pub(crate) fn remove_password(cert: Cert, password: &Password) -> Result<Cert> {
+
+    // let mut decrypted: Vec<Packet> = Vec::new();
+    let mut decrypted: Vec<Packet> = vec![decrypt_key(
+        cert.primary_key().key().clone().parts_into_secret()?,
+        password,
+    )?.into()];
+
+    for ka in cert.keys().subkeys().secret() {
+        decrypted.push(decrypt_key(
+                ka.key().clone().parts_into_secret()?,
+                password)?.into());
+    }
+
+    cert.insert_packets(decrypted)
+}
+
+pub(crate) fn set_password(cert: Cert, password: &Password) -> Result<Cert> {
+    let mut encrypted: Vec<Packet> = vec![
+        cert.primary_key().key().clone().parts_into_secret()?
+            .encrypt_secret(password)?.into()
+    ];
+    for ka in cert.keys().subkeys().unencrypted_secret() {
+        encrypted.push(
+            ka.key().clone().parts_into_secret()?
+            .encrypt_secret(password)?.into());
+            }
+    cert.insert_packets(encrypted)
+}
+
+// Decrypts a key, if possible.
+pub fn decrypt_key<R>(key: Key<key::SecretParts, R>, password: &Password)
+    -> Result<Key<key::SecretParts, R>>
+    where R: key::KeyRole + Clone
+{
+    let key = key.parts_as_secret()?;
+    match key.secret() {
+        SecretKeyMaterial::Unencrypted(_) => {
+            Ok(key.clone())
+        }
+        SecretKeyMaterial::Encrypted(_) => {
+            // for p in password.iter() {
+                if let Ok(key)
+                    = key.clone().decrypt_secret(&password)
+                {
+                    return Ok(key);
+                }
+                Err(anyhow::anyhow!("Password isn't correct"))
+            // }
         }
     }
 }

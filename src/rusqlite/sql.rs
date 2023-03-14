@@ -1,5 +1,5 @@
 pub const ACCOUNTSCHEMA: &str =
-"CREATE TABLE autocrypt_account (
+"CREATE TABLE IF NOT EXISTS autocrypt_account (
     address text primary key not null, 
     key text,
     prefer int,
@@ -35,7 +35,7 @@ pub const ACCOUNTDELETE: &str =
     WHERE address = ?;";
 
 pub const PEERSCHEMA: &str = 
-"CREATE TABLE autocrypt_peer (
+"CREATE TABLE IF NOT EXISTS autocrypt_peer (
     address text not null, 
     last_seen INT8, 
     timestamp INT8,
