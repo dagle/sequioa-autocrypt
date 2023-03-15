@@ -110,7 +110,8 @@ impl<T: SqlDriver> AutocryptStore<T> {
         builder = builder.set_cipher_suite(CipherSuite::Cv25519);
 
         builder = builder.add_signing_subkey();
-        builder = builder.add_subkey(KeyFlags::empty().set_transport_encryption(), None, None);
+        // We set storage_encryption so we can store drafts
+        builder = builder.add_subkey(KeyFlags::empty().set_transport_encryption().set_storage_encryption(), None, None);
 
         builder = builder.set_password(self.password.clone());
 
