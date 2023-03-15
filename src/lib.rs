@@ -9,6 +9,7 @@ pub mod driver;
 pub mod peer;
 pub mod sq;
 pub mod store;
+pub mod uirecommendation;
 
 #[cfg(feature = "rusqlite")]
 pub mod rusqlite;

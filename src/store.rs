@@ -6,7 +6,6 @@ use std::{
     time::SystemTime,
 };
 
-use crate::sq::{DHelper, VHelper};
 use crate::{
     account::Account,
     driver::{Selector, SqlDriver},
@@ -14,8 +13,12 @@ use crate::{
     sq::{remove_password, set_password, SessionKey},
     Result,
 };
+use crate::{
+    sq::{DHelper, VHelper},
+    uirecommendation::UIRecommendation,
+};
 use anyhow::Context;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use openpgp::packet::prelude::SecretKeyMaterial::{Encrypted, Unencrypted};
 use openpgp::{
     cert::{amalgamation::ValidateAmalgamation, CertBuilder, CipherSuite},
@@ -33,20 +36,6 @@ use openpgp::{
 use sequoia_autocrypt::{
     AutocryptHeader, AutocryptHeaderType, AutocryptSetupMessage, AutocryptSetupMessageParser,
 };
-
-/// UIRecommendation represent whether or not we should encrypt an email.
-/// Disable means that we shouldn't try to encrypt because it's likely people
-/// won't be able to read it.
-/// Discourage means that we have keys for all users to encrypt it but we don't
-/// we are not sure they are still valid (we haven't seen them in long while,
-/// we got them from gossip etc)
-/// Available means all systems are go.
-#[derive(Debug, PartialEq)]
-pub enum UIRecommendation {
-    Disable,
-    Discourage,
-    Available,
-}
 
 pub struct AutocryptStore<T: SqlDriver> {
     pub(crate) password: Option<Password>,
@@ -267,24 +256,46 @@ impl<T: SqlDriver> AutocryptStore<T> {
         }
     }
 
-    /// recommend tells the user whether or not it's a good idea to encrypt to a receiver
-    /// this should be called once for each receiver.
+    /// recommend tells the user whether or not it's a good idea to encrypt to a receiver.
+    /// This should be called once for each receiver. Autoencrypt is more eager to
+    /// encrypt when replying to encrypted emails.
     /// * `account_mail` - The user account or optional None if we are in wildmode
     /// * `peer_mail` - Peer we want to check if it's safe to encrypt to.
-    pub fn recommend(&self, account_mail: Option<&str>, peer_mail: &str) -> UIRecommendation {
+    /// * `reply_to_encrypted` - If we reply to an encrypted email.
+    /// * `prefer` - our account setting.
+    pub fn recommend(
+        &self,
+        account_mail: Option<&str>,
+        peer_mail: &str,
+        policy: &dyn Policy,
+        reply_to_encrypted: bool,
+        prefer: Prefer,
+    ) -> UIRecommendation {
         if let Ok(peer) = self.peer(account_mail, Selector::Email(peer_mail)) {
-            if peer.cert.is_some() {
-                let stale = Utc::now() + Duration::days(35);
-                if stale.cmp(&peer.last_seen) == Ordering::Less {
-                    return UIRecommendation::Discourage;
-                }
-                return UIRecommendation::Available;
+            let pre = peer.preliminary_recommend(policy);
+            if pre.encryptable() && reply_to_encrypted {
+                return UIRecommendation::Encrypt;
             }
-            if peer.gossip_cert.is_some() {
-                return UIRecommendation::Discourage;
+            if pre.preferable() && peer.prefer.encrypt() && prefer.encrypt() {
+                return UIRecommendation::Encrypt;
             }
+            return pre;
         }
         UIRecommendation::Disable
+    }
+
+    pub fn multi_recommend(
+        &self,
+        account_mail: Option<&str>,
+        peers_mail: &[&str],
+        policy: &dyn Policy,
+        reply_to_encrypted: bool,
+        prefer: Prefer,
+    ) -> UIRecommendation {
+        peers_mail
+            .iter()
+            .map(|m| self.recommend(account_mail, m, policy, reply_to_encrypted, prefer))
+            .sum()
     }
 
     /// Generate a autocryptheader to be inserted into a email header with our public key.
@@ -893,7 +904,10 @@ mod tests {
         let account = ctx.conn.get_account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
-        assert_eq!(ctx.recommend(Some(OUR), PEER1), UIRecommendation::Available);
+        assert_eq!(
+            ctx.recommend(Some(OUR), PEER1, &policy, false, Prefer::Mutual),
+            UIRecommendation::Encrypt
+        );
     }
 
     #[test]
@@ -904,10 +918,16 @@ mod tests {
         ctx.update_private_key(&policy, OUR).unwrap();
         let account = ctx.conn.get_account(OUR).unwrap();
 
-        assert_eq!(ctx.recommend(Some(OUR), PEER1), UIRecommendation::Disable);
+        assert_eq!(
+            ctx.recommend(Some(OUR), PEER1, &policy, false, Prefer::Mutual),
+            UIRecommendation::Disable
+        );
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
-        assert_eq!(ctx.recommend(Some(OUR), PEER2), UIRecommendation::Disable);
+        assert_eq!(
+            ctx.recommend(Some(OUR), PEER2, &policy, false, Prefer::Mutual),
+            UIRecommendation::Disable
+        );
     }
 
     #[test]
@@ -921,7 +941,7 @@ mod tests {
         gen_peer(&ctx, &account.mail, PEER1, Mode::Gossip, Prefer::Mutual).unwrap();
 
         assert_eq!(
-            ctx.recommend(Some(OUR), PEER1),
+            ctx.recommend(Some(OUR), PEER1, &policy, false, Prefer::Mutual),
             UIRecommendation::Discourage
         )
     }

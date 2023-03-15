@@ -1,8 +1,8 @@
 extern crate sequoia_openpgp as openpgp;
-use std::borrow::Cow;
+use std::{borrow::Cow, cmp::Ordering};
 
-use crate::Result;
-use chrono::{DateTime, Utc};
+use crate::{uirecommendation::UIRecommendation, Result};
+use chrono::{DateTime, Duration, Utc};
 use openpgp::{policy::Policy, serialize::stream::Recipient, Cert};
 
 // we try to to get an encryption key for the specific field
@@ -17,13 +17,28 @@ macro_rules! encrypt_key {
                 .revoked(false)
                 .supported()
                 .for_transport_encryption()
-                .map(|ka| ka.key())
                 .nth(0)
+                .map(|ka| ka.key())
             {
                 return Ok(key.into());
             }
         }
     };
+}
+
+fn valid_cert(cert: &Option<Cow<Cert>>, policy: &dyn Policy) -> bool {
+    if let Some(ref cert) = cert {
+        cert.keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .supported()
+            .for_transport_encryption()
+            .next()
+            .is_some()
+    } else {
+        false
+    }
 }
 
 /// Do we and/or peers prefer encrypted emails or cleartext emails.
@@ -40,6 +55,15 @@ impl From<Prefer> for Option<&str> {
             Prefer::Mutual => Some("mutual"),
             Prefer::Nopreference => Some("nopreference"),
         }
+    }
+}
+
+impl Prefer {
+    pub(crate) fn encrypt(self) -> bool {
+        if self == Self::Mutual {
+            return true;
+        }
+        false
     }
 }
 
@@ -88,7 +112,30 @@ impl<'a> Peer<'a> {
             }
         }
     }
-    pub fn get_recipient(&'a self, policy: &'a dyn Policy) -> Result<Recipient> {
+
+    // Determine if encryption is possible
+    pub(crate) fn can_encrypt(&self, policy: &dyn Policy) -> bool {
+        valid_cert(&self.cert, policy) || valid_cert(&self.gossip_cert, policy)
+    }
+
+    pub(crate) fn preliminary_recommend(&self, policy: &dyn Policy) -> UIRecommendation {
+        if !self.can_encrypt(policy) {
+            return UIRecommendation::Disable;
+        }
+        if self.cert.is_some() {
+            let stale = Utc::now() + Duration::days(35);
+            if stale.cmp(&self.last_seen) == Ordering::Less {
+                return UIRecommendation::Discourage;
+            }
+            return UIRecommendation::Available;
+        }
+        if self.gossip_cert.is_some() {
+            return UIRecommendation::Discourage;
+        }
+        UIRecommendation::Disable
+    }
+
+    pub(crate) fn get_recipient(&'a self, policy: &'a dyn Policy) -> Result<Recipient> {
         encrypt_key!(self.cert, policy);
         encrypt_key!(self.gossip_cert, policy);
         Err(anyhow::anyhow!(
