@@ -66,6 +66,14 @@ impl<T: SqlDriver> AutocryptStore<T> {
         self.conn.get_account(canonicalized_mail)
     }
 
+    #[cfg(feature = "cert-d")]
+    /// Get an cert for an account
+    /// * `canonicalized_mail` - email account for the account
+    pub fn account_cert(&self, canonicalized_mail: &str) -> Result<Cert> {
+        let account = self.account(canonicalized_mail)?;
+        Ok(account.cert)
+    }
+
     pub fn set_prefer(&self, canonicalized_mail: &str, prefer: Prefer) -> Result<()> {
         let mut account = self.conn.get_account(canonicalized_mail)?;
         account.prefer = prefer;
@@ -95,6 +103,16 @@ impl<T: SqlDriver> AutocryptStore<T> {
         check_mode!(self, account_mail);
 
         self.conn.get_peer(account_mail, selector.into())
+    }
+
+    #[cfg(feature = "cert-d")]
+    /// Get cert and gossip cert for a peer
+    /// * `account_mail` - The user account or optional None if we are in wildmode
+    /// * `mail` - The peer email account
+    pub fn peer_cert(&self, account_mail: Option<&str>, mail: &str)
+        -> Result<(Option<Cert>, Option<Cert>)> {
+        let peer = self.peer(account_mail, mail)?;
+        Ok((peer.cert.map(|c| c.into_owned()), peer.gossip_cert.map(|c| c.into_owned())))
     }
 
     fn gen_cert(&self, account_mail: &str, now: SystemTime) -> Result<(Cert, Signature)> {

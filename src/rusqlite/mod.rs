@@ -1,7 +1,7 @@
 extern crate sequoia_openpgp as openpgp;
 use rusqlite::types::{FromSql, FromSqlError, ToSqlOutput, Value};
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{params, Connection, Rows, ToSql};
@@ -89,6 +89,13 @@ macro_rules! get_time {
 
 pub struct SqliteDriver {
     conn: Connection,
+}
+
+pub fn cert_d_path() -> Option<PathBuf> {
+   let mut data_dir = dirs::data_dir()?;
+   data_dir.push("/pgp.cert.d");
+   data_dir.push("/_autocrypt.sqlite");
+   Some(data_dir)
 }
 
 impl SqliteDriver {
