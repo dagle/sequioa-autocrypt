@@ -53,6 +53,13 @@ macro_rules! check_mode {
     };
 }
 
+/// An autocrypt store, responsible for key storage.
+///
+/// AutocryptStore stores your pgp keys and encrypts and decrypts data.
+/// AutocryptStore does not contain an sign function because it's not in the scope of autocrypt.
+///
+/// All arguments that accept on or more emails expect the emails to be canonicalized. If not
+/// canonicalized, comparisons might fail.
 impl<T: SqlDriver> AutocryptStore<T> {
     pub fn new(conn: T, password: Option<&str>, wildmode: bool) -> Result<Self> {
         Ok(AutocryptStore {
@@ -62,37 +69,43 @@ impl<T: SqlDriver> AutocryptStore<T> {
         })
     }
 
-    fn account(&self, canonicalized_mail: &str) -> Result<Account> {
-        self.conn.get_account(canonicalized_mail)
+    fn account(&self, account_mail: &str) -> Result<Account> {
+        self.conn.get_account(account_mail)
     }
 
     #[cfg(feature = "cert-d")]
-    /// Get an cert for an account
-    /// * `canonicalized_mail` - email account for the account
-    pub fn account_cert(&self, canonicalized_mail: &str) -> Result<Cert> {
-        let account = self.account(canonicalized_mail)?;
+    /// Get a cert for an account
+    pub fn account_cert(&self, account_mail: &str) -> Result<Cert> {
+        let account = self.account(account_mail)?;
         Ok(account.cert)
     }
 
-    pub fn set_prefer(&self, canonicalized_mail: &str, prefer: Prefer) -> Result<()> {
-        let mut account = self.conn.get_account(canonicalized_mail)?;
+    /// Set the prefer setting for an account
+    pub fn set_prefer(&self, account_mail: &str, prefer: Prefer) -> Result<()> {
+        let mut account = self.conn.get_account(account_mail)?;
         account.prefer = prefer;
         self.conn.insert_account(&account)
     }
 
-    pub fn prefer(&self, canonicalized_mail: &str) -> Result<Prefer> {
-        let account = self.conn.get_account(canonicalized_mail)?;
+    /// Get the prefer setting for an account
+    pub fn prefer(&self, account_mail: &str) -> Result<Prefer> {
+        let account = self.conn.get_account(account_mail)?;
         Ok(account.prefer)
     }
 
-    pub fn set_enable(&self, canonicalized_mail: &str, enable: bool) -> Result<()> {
-        let mut account = self.conn.get_account(canonicalized_mail)?;
+    /// Set enable for an account
+    /// These are just internal settings and doesn't effect runtime.
+    /// Functions such as recommend does not check the enable and it's up
+    /// the user to do so.
+    pub fn set_enable(&self, account_mail: &str, enable: bool) -> Result<()> {
+        let mut account = self.conn.get_account(account_mail)?;
         account.enable = enable;
         self.conn.insert_account(&account)
     }
 
-    pub fn enable(&self, canonicalized_mail: &str) -> Result<bool> {
-        let account = self.conn.get_account(canonicalized_mail)?;
+    /// Get enable for an account
+    pub fn enable(&self, account_mail: &str) -> Result<bool> {
+        let account = self.conn.get_account(account_mail)?;
         Ok(account.enable)
     }
 
@@ -173,27 +186,36 @@ impl<T: SqlDriver> AutocryptStore<T> {
         Ok(())
     }
 
-    /// Update the when we last saw this email.
+    /// Update the when we last saw this peer. If the date is older than our
+    /// current value, nothing happens.
     /// * `account_mail` - The user account or optional None if we are in wildmode
+    /// * `peer_mail` - Peer we want to update
+    /// * `effective_date` - The date we want to update to. This should be the date from the email.
     pub fn update_last_seen(
         &self,
         account_mail: Option<&str>,
         peer_mail: &str,
-        now: DateTime<Utc>,
+        effective_date: DateTime<Utc>,
     ) -> Result<()> {
-        if now.cmp(&Utc::now()) == Ordering::Greater {
+        if effective_date.cmp(&Utc::now()) == Ordering::Greater {
             return Err(anyhow::anyhow!("Date is in the future"));
         }
 
         let mut peer = self.peer(account_mail, peer_mail)?;
 
-        peer.last_seen = now;
+        peer.last_seen = effective_date;
 
         self.conn.update_peer(&peer, account_mail.is_some())
     }
 
     /// Update the peer. If the data is older than what we currently have in the database
     /// no update is done.
+    /// * `account_mail` - The user account or optional None if we are in wildmode
+    /// * `peer_mail` - Peer we want to update
+    /// * `key` - Cert we want to install.
+    /// * `prefer` - If the peer prefers encryption
+    /// * `effective_date` - The date we want to update to. This should be the date from the email.
+    /// * `gossip` - if this is gossip data
     pub fn update_peer(
         &self,
         account_mail: &str,
@@ -267,6 +289,7 @@ impl<T: SqlDriver> AutocryptStore<T> {
                     peer.gossip_timestamp = Some(effective_date);
                     peer.gossip_cert = Some(Cow::Borrowed(key));
                     peer.account = account_mail.to_owned();
+                    peer.prefer = prefer;
                 }
                 self.conn.update_peer(&peer, self.wildmode)?;
 
@@ -303,6 +326,11 @@ impl<T: SqlDriver> AutocryptStore<T> {
         UIRecommendation::Disable
     }
 
+    /// multi_recommend runs recommend on multiple peers.
+    /// * `account_mail` - The user account or optional None if we are in wildmode
+    /// * `peers_mail` - Peers we want to check if it's safe to encrypt to.
+    /// * `reply_to_encrypted` - If we reply to an encrypted email.
+    /// * `prefer` - our account setting.
     pub fn multi_recommend(
         &self,
         account_mail: Option<&str>,
@@ -317,7 +345,7 @@ impl<T: SqlDriver> AutocryptStore<T> {
             .sum()
     }
 
-    /// Generate a autocryptheader to be inserted into a email header with our public key.
+    /// Generate an autocryptheader to be inserted into a email header with our public key.
     pub fn header(
         &self,
         account_mail: &str,
@@ -412,14 +440,13 @@ impl<T: SqlDriver> AutocryptStore<T> {
         Ok(())
     }
 
-    /// Encrypt input
-    /// * `account_mail` - our email address. Used to sign the email and to
-    /// fetch peers if we're not in wildmode
+    /// Encrypt input. If we are in wildmode, we fetch peers from all accounts,
+    /// otherwise we are limited to the peers associated with the account 
     /// * `peers` - email address to the peers we want to send email to.
     pub fn encrypt(
         &self,
         policy: &dyn Policy,
-        canonicalized_mail: &str,
+        account_mail: &str,
         peers: &[&str],
         input: &mut (dyn Read + Send + Sync),
         output: &mut (dyn Write + Send + Sync),
@@ -431,12 +458,12 @@ impl<T: SqlDriver> AutocryptStore<T> {
         let message = stream::Message::new(output);
 
         let mut recipient_subkeys: Vec<Recipient> = Vec::new();
-        let account = self.account(canonicalized_mail)?;
+        let account = self.account(account_mail)?;
         for rep in peers.iter() {
             let peer = if self.wildmode {
                 self.peer(None, Selector::Email(rep))?
             } else {
-                self.peer(Some(canonicalized_mail), Selector::Email(rep))?
+                self.peer(Some(account_mail), Selector::Email(rep))?
             };
             fetched_peers.push(peer);
         }
@@ -498,9 +525,10 @@ impl<T: SqlDriver> AutocryptStore<T> {
         Ok(())
     }
 
-    /// Decrypt input
-    /// * `account_mail` - our email address. Used to decrypt email and to
-    /// fetch peers for verify signatures, if we're not in wildmode.
+    /// Decrypt input. This function will try to fetch peers needed to decrypt
+    /// and verify the input. If we are in wildmode, we fetch peers from all
+    /// accounts, otherwise we are limited to the peers associated with the account 
+    /// If we have a session key, we will try it first.
     pub fn decrypt<S>(
         &self,
         policy: &dyn Policy,
@@ -532,10 +560,11 @@ impl<T: SqlDriver> AutocryptStore<T> {
         Ok(())
     }
 
-    /// Verify an email, since autocrypt is mainly for encrypting/decrypting emails
+    /// Verify input. This function will try to fetch peers needed to verify
+    /// the input. If we are in wildmode, we fetch peers from all
+    /// accounts, otherwise we are limited to the peers associated with the account 
+    /// Since autocrypt is mainly for encrypting/decrypting emails
     /// and decrypt checks signatures, this function is rarely used.
-    /// * `account_mail` - our email address. Used to decrypt email and to
-    /// fetch peers for verify signatures, if we're not in wildmode
     pub fn verify(
         &self,
         policy: &dyn Policy,
