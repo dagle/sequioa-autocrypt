@@ -4,6 +4,8 @@
 // autocrypt focuses on sending encrypted messages between MUA's
 // and not signing clear text messages.
 
+use sequoia_openpgp::packet::UserID;
+
 pub mod account;
 pub mod driver;
 pub mod peer;
@@ -11,18 +13,20 @@ pub mod sq;
 pub mod store;
 pub mod uirecommendation;
 
+pub mod certd;
+
 #[cfg(feature = "rusqlite")]
 pub mod rusqlite;
 
 pub type Result<T> = sequoia_openpgp::Result<T>;
 
-pub fn canonicalize(email: &str) -> Option<String> {
-    let at = email.find('@')?;
-    let username = &email[..at];
-    let lower = username.to_lowercase();
-    let domain = &email[at + 1..];
-    let idn = idna::domain_to_ascii(domain).ok()?;
-    Some(format!("{}@{}", lower, idn))
+pub fn canonicalize(email: &str) -> Result<String> {
+    let uid = UserID::from_address(None, None, email)?;
+    match uid.email_normalized() {
+        Ok(None) => Err(anyhow::anyhow!("Email address couldn't be normalized")),
+        Ok(Some(s)) => Ok(s),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
