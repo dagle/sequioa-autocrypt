@@ -57,7 +57,7 @@ fn parsed_email(ac: &AutocryptStore<SqliteDriver>) -> Result<()> {
     // All emails needs to be canonicalize before inserting them into the database
     // or comparisons in the database might fail.
     let canonicalized_email =
-        canonicalize(address).ok_or_else(|| anyhow::anyhow!("Address is the wrong format"))?;
+        canonicalize(address)?;
 
     ac.update_peer(OUR, &canonicalized_email, &cert, prefer, date, false)?;
     Ok(())
@@ -73,7 +73,7 @@ pub fn encrypt(
     let mut result = Vec::new();
 
     let reciever_can =
-        canonicalize(reciever).ok_or_else(|| anyhow::anyhow!("Address is the wrong format"))?;
+        canonicalize(reciever)?;
 
     ac.encrypt(
         policy,
