@@ -1,26 +1,28 @@
 extern crate sequoia_openpgp as openpgp;
 use std::{borrow::Cow, cmp::Ordering};
 
-use crate::{uirecommendation::UIRecommendation, Result};
+use crate::{uirecommendation::UIRecommendation, Result, driver::SqlDriver};
 use chrono::{DateTime, Duration, Utc};
-use openpgp::{policy::Policy, serialize::stream::Recipient, Cert};
+use openpgp::{policy::Policy, serialize::stream::Recipient, Cert, Fingerprint};
 
 // we try to to get an encryption key for the specific field
 // and return the key if we find one
 macro_rules! encrypt_key {
-    ($select:expr, $policy:expr) => {
-        if let Some(ref cert) = $select {
-            if let Some(key) = cert
-                .keys()
-                .with_policy($policy, None)
-                .alive()
-                .revoked(false)
-                .supported()
-                .for_transport_encryption()
-                .nth(0)
-                .map(|ka| ka.key())
-            {
-                return Ok(key.into());
+    ($db:ident, $select:expr, $policy:expr) => {
+        if let Some(ref fpr) = $select {
+            if let Ok(cert) = $db.cert(None, $select.into()) {
+                if let Some(key) = cert
+                    .keys()
+                        .with_policy($policy, None)
+                        .alive()
+                        .revoked(false)
+                        .supported()
+                        .for_transport_encryption()
+                        .nth(0)
+                        .map(|ka| ka.key())
+                {
+                    return Ok(key.into());
+                }
             }
         }
     };
@@ -68,23 +70,23 @@ impl Prefer {
 }
 
 #[derive(PartialEq, Debug)]
-pub struct Peer<'a> {
+pub struct Peer {
     pub mail: String,
     pub account: String,
     pub last_seen: DateTime<Utc>,
     pub timestamp: Option<DateTime<Utc>>,
-    pub cert: Option<Cow<'a, Cert>>,
+    pub cert_fpr: Option<Fingerprint>,
     pub gossip_timestamp: Option<DateTime<Utc>>,
-    pub gossip_cert: Option<Cow<'a, Cert>>,
+    pub gossip_fpr: Option<Fingerprint>,
     pub prefer: Prefer,
 }
 
-impl<'a> Peer<'a> {
+impl Peer {
     pub fn new(
         mail: &str,
         account: &str,
         now: DateTime<Utc>,
-        key: &'a Cert,
+        key: & Cert,
         gossip: bool,
         prefer: Prefer,
     ) -> Self {
@@ -94,9 +96,9 @@ impl<'a> Peer<'a> {
                 account: account.to_owned(),
                 last_seen: now,
                 timestamp: Some(now),
-                cert: Some(Cow::Borrowed(key)),
+                cert_fpr: Some(key.fingerprint()),
                 gossip_timestamp: None,
-                gossip_cert: None,
+                gossip_fpr: None,
                 prefer,
             }
         } else {
@@ -105,10 +107,10 @@ impl<'a> Peer<'a> {
                 account: account.to_owned(),
                 last_seen: now,
                 timestamp: None,
-                cert: None,
+                cert_fpr: None,
                 gossip_timestamp: Some(now),
-                gossip_cert: Some(Cow::Borrowed(key)),
-                prefer,
+                gossip_fpr: Some(key.fingerprint()),
+                prefer: Prefer::default(),
             }
         }
     }
@@ -135,9 +137,9 @@ impl<'a> Peer<'a> {
         UIRecommendation::Disable
     }
 
-    pub(crate) fn get_recipient(&'a self, policy: &'a dyn Policy) -> Result<Recipient> {
-        encrypt_key!(self.cert, policy);
-        encrypt_key!(self.gossip_cert, policy);
+    pub(crate) fn get_recipient<D: SqlDriver>(&self, db: &D, policy: &dyn Policy) -> Result<Recipient> {
+        encrypt_key!(db, self.cert_fpr, policy);
+        encrypt_key!(db, self.gossip_fpr, policy);
         Err(anyhow::anyhow!(
             "Couldn't find any key for transport encryption for peer"
         ))

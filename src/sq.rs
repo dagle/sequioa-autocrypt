@@ -10,6 +10,7 @@ use openpgp::parse::stream::{DecryptionHelper, MessageStructure, VerificationHel
 use openpgp::policy::Policy;
 use openpgp::types::{PublicKeyAlgorithm, SymmetricAlgorithm};
 use openpgp::{crypto, Cert, Fingerprint, KeyID, Packet};
+use sequoia_cert_store::Store;
 use std::collections::HashMap;
 
 // We pair a session key with the algorithm for easier access.
@@ -135,12 +136,12 @@ where
 
 pub struct VHelper<'a, T: SqlDriver> {
     ctx: &'a AutocryptStore<T>,
-    account_email: Option<&'a str>,
+    account_mail: Option<&'a str>,
 }
 
 impl<'a, T: SqlDriver> VHelper<'a, T> {
     pub fn new(ctx: &'a AutocryptStore<T>, account_email: Option<&'a str>) -> Self {
-        VHelper { ctx, account_email }
+        VHelper { ctx, account_mail: account_email }
     }
 }
 
@@ -150,13 +151,8 @@ impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T> {
     fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
         let mut certs = Vec::new();
         for id in _ids {
-            if let Ok(peer) = self.ctx.conn.get_peer(self.account_email, id.into()) {
-                if let Some(c) = peer.cert {
-                    certs.push(c.into_owned())
-                }
-                if let Some(c) = peer.gossip_cert {
-                    certs.push(c.into_owned())
-                }
+            if let Ok(cert) = self.ctx.conn.get_key(self.account_mail, id) {
+                certs.push(cert)
             }
         }
         Ok(certs)
@@ -170,9 +166,10 @@ impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T> {
 
 pub struct DHelper<'a, T: SqlDriver> {
     ctx: &'a AutocryptStore<T>,
+    account_mail: Option<&'a str>,
     sk: Option<SessionKey>,
     keys: HashMap<KeyID, PrivateKey>,
-    fp: Fingerprint,
+    fp: Fingerprint, // TODO: remove
 
     helper: VHelper<'a, T>,
 }
@@ -200,6 +197,7 @@ impl<'a, T: SqlDriver> DHelper<'a, T> {
         }
         DHelper {
             ctx,
+            account_mail,
             sk,
             keys,
             fp: cert.fingerprint(),
@@ -298,39 +296,36 @@ impl<'a, T: SqlDriver> DecryptionHelper for DHelper<'a, T> {
         // should we support unencrypted keys?
         // leave it for now
         for pkesk in pkesks {
-            let keyid = pkesk.recipient();
-            if let Some(key) = self.keys.get_mut(keyid) {
-                let algo = key.pk_algo();
-                if let Some(d) = key.get_unlock() {
-                    if self.try_decrypt(pkesk, sym_algo, algo, d, &mut decrypt) {
-                        return Ok(Some(self.fp.clone()));
-                    }
-                }
-            }
-        }
-
-        for pkesk in pkesks {
-            // Don't ask the user to decrypt a key if we don't support
-            // the algorithm.
-            if !pkesk.pk_algo().is_supported() {
+            if ! pkesk.pk_algo().is_supported() {
                 continue;
             }
 
             let keyid = pkesk.recipient();
+            let apa = self.ctx.conn.key(self.account_mail, keyid.into())?;
+
             if let Some(key) = self.keys.get_mut(keyid) {
-                if key.get_unlock().is_some() {
-                    continue;
-                }
-                if let Ok(decryptor) = key.unlock(&self.ctx.password) {
-                    let algo = key.pk_algo();
-                    if self.try_decrypt(pkesk, sym_algo, algo, decryptor, &mut decrypt) {
-                        return Ok(Some(self.fp.clone()));
+                let algo = key.pk_algo();
+
+                match key.get_unlock() {
+                    Some(d) => {
+                        if self.try_decrypt(pkesk, sym_algo, algo, d, &mut decrypt) {
+                            return Ok(Some(self.fp.clone()));
+                        }
                     }
-                } else {
-                    return Err(anyhow::anyhow!("Password is wrong for our key"));
+                    None => {
+                        if let Ok(decryptor) = key.unlock(&self.ctx.password) {
+                            let algo = key.pk_algo();
+                            if self.try_decrypt(pkesk, sym_algo, algo, decryptor, &mut decrypt) {
+                                return Ok(Some(self.fp.clone()));
+                            }
+                        } else {
+                            return Err(anyhow::anyhow!("Password is wrong for our key"));
+                        }
+                    }
                 }
             }
         }
+
         Err(anyhow::anyhow!("Couldn't decrypt "))
     }
 }

@@ -1,14 +1,12 @@
 extern crate sequoia_openpgp as openpgp;
 use std::{
-    borrow::Cow,
-    cmp::Ordering,
     io::{self, Read, Write},
     time::SystemTime,
 };
 
 use crate::{
     account::Account,
-    driver::{Selector, SqlDriver},
+    driver::SqlDriver,
     peer::{Peer, Prefer},
     sq::{remove_password, set_password, SessionKey},
     Result,
@@ -69,27 +67,21 @@ impl<T: SqlDriver> AutocryptStore<T> {
         })
     }
 
-    fn account(&self, account_mail: &str) -> Result<Account> {
-        self.conn.get_account(account_mail)
-    }
-
-    #[cfg(feature = "cert-d")]
-    /// Get a cert for an account
-    pub fn account_cert(&self, account_mail: &str) -> Result<Cert> {
-        let account = self.account(account_mail)?;
-        Ok(account.cert)
+    fn account(&self, account_mail: &str) -> Result<Account>
+    {
+        self.conn.account(account_mail)
     }
 
     /// Set the prefer setting for an account
     pub fn set_prefer(&self, account_mail: &str, prefer: Prefer) -> Result<()> {
-        let mut account = self.conn.get_account(account_mail)?;
+        let mut account = self.conn.account(account_mail)?;
         account.prefer = prefer;
         self.conn.insert_account(&account)
     }
 
     /// Get the prefer setting for an account
     pub fn prefer(&self, account_mail: &str) -> Result<Prefer> {
-        let account = self.conn.get_account(account_mail)?;
+        let account = self.conn.account(account_mail)?;
         Ok(account.prefer)
     }
 
@@ -98,34 +90,22 @@ impl<T: SqlDriver> AutocryptStore<T> {
     /// Functions such as recommend does not check the enable and it's up
     /// the user to do so.
     pub fn set_enable(&self, account_mail: &str, enable: bool) -> Result<()> {
-        let mut account = self.conn.get_account(account_mail)?;
+        let mut account = self.conn.account(account_mail)?;
         account.enable = enable;
         self.conn.insert_account(&account)
     }
 
     /// Get enable for an account
     pub fn enable(&self, account_mail: &str) -> Result<bool> {
-        let account = self.conn.get_account(account_mail)?;
+        let account = self.conn.account(account_mail.into())?;
         Ok(account.enable)
     }
 
-    fn peer<'a, S>(&self, account_mail: Option<&str>, selector: S) -> Result<Peer>
-    where
-        S: Into<Selector<'a>>,
+    fn peer(&self, account_mail: Option<&str>, mail: &str) -> Result<Peer>
     {
         check_mode!(self, account_mail);
 
-        self.conn.get_peer(account_mail, selector.into())
-    }
-
-    #[cfg(feature = "cert-d")]
-    /// Get cert and gossip cert for a peer
-    /// * `account_mail` - The user account or optional None if we are in wildmode
-    /// * `mail` - The peer email account
-    pub fn peer_cert(&self, account_mail: Option<&str>, mail: &str)
-        -> Result<(Option<Cert>, Option<Cert>)> {
-        let peer = self.peer(account_mail, mail)?;
-        Ok((peer.cert.map(|c| c.into_owned()), peer.gossip_cert.map(|c| c.into_owned())))
+        self.conn.peer(account_mail, mail)
     }
 
     fn gen_cert(&self, account_mail: &str, now: SystemTime) -> Result<(Cert, Signature)> {
@@ -134,13 +114,13 @@ impl<T: SqlDriver> AutocryptStore<T> {
         builder = builder.set_creation_time(now);
 
         builder = builder.set_validity_period(None);
-
         // builder = builder.set_validity_period(
         //     Some(Duration::new(3 * SECONDS_IN_YEAR, 0))),
 
         builder = builder.set_cipher_suite(CipherSuite::Cv25519);
 
-        builder = builder.add_signing_subkey();
+        // builder = builder.add_signing_subkey();
+        builder = builder.set_primary_key_flags(KeyFlags::empty().set_signing());
         // We set storage_encryption so we can store drafts
         builder = builder.add_subkey(KeyFlags::empty().set_transport_encryption().set_storage_encryption(), None, None);
 
@@ -151,38 +131,31 @@ impl<T: SqlDriver> AutocryptStore<T> {
 
     /// Update the private key the account for our mail. If the current key is
     /// is still usable, no update is done.
+    // add flag about create account?
     pub fn update_private_key(&self, policy: &dyn Policy, account_mail: &str) -> Result<()> {
         let now = SystemTime::now();
 
         // Check if we have a key, if that is the case, check if the key is ok.
-        let account = if let Ok(mut account) = self.conn.get_account(account_mail) {
-            if account.cert.primary_key().with_policy(policy, now).is_ok() {
+        if let Ok(mut account) = self.conn.account(account_mail) {
+            let cert = self.conn.cert(Some(account_mail), account.fpr.into())?;
+
+            if cert.primary_key().with_policy(policy, now).is_ok() {
                 return Ok(());
             }
+            
             let (cert, _) = self.gen_cert(account_mail, now)?;
 
-            account.cert = cert;
-            self.conn.update_account(&account)?;
-            account
+            account.fpr = cert.fingerprint();
+            self.conn.set_account(&account)?;
+            self.conn.set_cert(account_mail, &cert)?;
         } else {
             let (cert, _) = self.gen_cert(account_mail, now)?;
 
-            let account = Account::new(account_mail, cert);
-            self.conn.insert_account(&account)?;
-            account
+            let account = Account::new(account_mail, cert.fingerprint());
+            self.conn.set_account(&account)?;
+            self.conn.set_cert(account_mail, &cert)?;
         };
 
-        // We insert our own account into the peers, this is so we can send encrypted emails
-        // to our self and use it to make encrypted drafts
-        self.update_peer_forceable(
-            account_mail,
-            account_mail,
-            &account.cert,
-            account.prefer,
-            now.into(),
-            false,
-            true,
-        )?;
         Ok(())
     }
 
@@ -197,15 +170,18 @@ impl<T: SqlDriver> AutocryptStore<T> {
         peer_mail: &str,
         effective_date: DateTime<Utc>,
     ) -> Result<()> {
-        if effective_date.cmp(&Utc::now()) == Ordering::Greater {
+
+        if effective_date > Utc::now() {
             return Err(anyhow::anyhow!("Date is in the future"));
         }
 
         let mut peer = self.peer(account_mail, peer_mail)?;
 
-        peer.last_seen = effective_date;
+        if peer.last_seen < effective_date {
+            peer.last_seen = effective_date;
 
-        self.conn.update_peer(&peer, account_mail.is_some())
+            self.conn.update_peer(&peer, account_mail.is_some())
+        }
     }
 
     /// Update the peer. If the data is older than what we currently have in the database
@@ -216,82 +192,84 @@ impl<T: SqlDriver> AutocryptStore<T> {
     /// * `prefer` - If the peer prefers encryption
     /// * `effective_date` - The date we want to update to. This should be the date from the email.
     /// * `gossip` - if this is gossip data
-    pub fn update_peer(
-        &self,
-        account_mail: &str,
-        peer_mail: &str,
-        key: &Cert,
-        prefer: Prefer,
-        effective_date: DateTime<Utc>,
-        gossip: bool,
-    ) -> Result<bool> {
-        self.update_peer_forceable(
-            account_mail,
-            peer_mail,
-            key,
-            prefer,
-            effective_date,
-            gossip,
-            false,
-        )
-    }
+    // pub fn update_peer(
+    //     &self,
+    //     account_mail: &str,
+    //     peer_mail: &str,
+    //     key: &Cert,
+    //     prefer: Prefer,
+    //     effective_date: DateTime<Utc>,
+    //     gossip: bool,
+    // ) -> Result<bool> {
+    //     self.update_peer_forceable(
+    //         account_mail,
+    //         peer_mail,
+    //         key,
+    //         prefer,
+    //         effective_date,
+    //         gossip,
+    //         false,
+    //     )
+    // }
 
     // like update_peer but we can force updates. It's mostly used to install the peer associated
     // with the account.
-    fn update_peer_forceable(
+    fn update_peer(
         &self,
         account_mail: &str,
         peer_mail: &str,
-        key: &Cert,
+        cert: &Cert,
         prefer: Prefer,
         effective_date: DateTime<Utc>,
         gossip: bool,
-        force: bool,
     ) -> Result<bool> {
-        if !force && account_mail == peer_mail {
+        if account_mail == peer_mail {
             return Err(anyhow::anyhow!(
-                "Updating the peer for your private key isn't allowed directly."
+                "Setting a peer for your private key isn't allowed" 
             ));
         }
 
         let peer = if self.wildmode {
-            self.peer(None, Selector::Email(peer_mail))
+            self.peer(None, peer_mail)
         } else {
-            self.peer(Some(account_mail), Selector::Email(peer_mail))
+            self.peer(Some(account_mail), peer_mail)
         };
 
         match peer {
             Err(_) => {
-                let peer = Peer::new(peer_mail, account_mail, effective_date, key, gossip, prefer);
-                self.conn.insert_peer(&peer)?;
+                let peer = Peer::new(peer_mail, account_mail, effective_date, cert, gossip, prefer);
+                self.conn.set_peer(&peer)?;
                 Ok(true)
             }
             Ok(mut peer) => {
-                if !force && effective_date.cmp(&peer.last_seen) == Ordering::Less {
+                if effective_date <= peer.last_seen {
                     return Ok(false);
                 }
 
                 peer.last_seen = effective_date;
 
                 if !gossip {
-                    if force
-                        || peer.timestamp.is_none()
-                        || effective_date.cmp(&peer.timestamp.unwrap()) == Ordering::Greater
+                    if peer.timestamp.is_none() || 
+                        effective_date > peer.timestamp.unwrap()
                     {
                         peer.timestamp = Some(effective_date);
-                        peer.cert = Some(Cow::Borrowed(key));
+                        peer.cert_fpr = Some(cert.fingerprint());
+
                         peer.account = account_mail.to_owned();
+                        peer.prefer = prefer;
+
                     }
-                } else if force
-                    || peer.gossip_timestamp.is_none()
-                    || effective_date.cmp(&peer.gossip_timestamp.unwrap()) == Ordering::Greater
+                } else if peer.gossip_timestamp.is_none() ||
+                    effective_date > peer.gossip_timestamp.unwrap()
                 {
                     peer.gossip_timestamp = Some(effective_date);
-                    peer.gossip_cert = Some(Cow::Borrowed(key));
+                    peer.gossip_fpr = Some(cert.fingerprint());
+
                     peer.account = account_mail.to_owned();
-                    peer.prefer = prefer;
                 }
                 self.conn.update_peer(&peer, self.wildmode)?;
+
+                self.conn.set_cert(&peer.account, &cert)?;
 
                 Ok(true)
             }
@@ -313,7 +291,7 @@ impl<T: SqlDriver> AutocryptStore<T> {
         reply_to_encrypted: bool,
         prefer: Prefer,
     ) -> UIRecommendation {
-        if let Ok(peer) = self.peer(account_mail, Selector::Email(peer_mail)) {
+        if let Ok(peer) = self.peer(account_mail, peer_mail) {
             let pre = peer.preliminary_recommend(policy);
             if pre.encryptable() && reply_to_encrypted {
                 return UIRecommendation::Encrypt;
@@ -353,8 +331,13 @@ impl<T: SqlDriver> AutocryptStore<T> {
         prefer: Prefer,
     ) -> Result<AutocryptHeader> {
         let account = self.account(account_mail)?;
+        let cert = if let Some(ref password) = self.password {
+            remove_password(account.cert, password)?
+        } else {
+            account.cert
+        };
 
-        AutocryptHeader::new_sender(policy, &account.cert, account_mail, prefer)
+        AutocryptHeader::new_sender(policy, &cert, account_mail, prefer)
     }
 
     /// Generate a autocryptheader to be inserted into a email header
@@ -368,7 +351,7 @@ impl<T: SqlDriver> AutocryptStore<T> {
         peer_mail: &str,
         policy: &dyn Policy,
     ) -> Result<AutocryptHeader> {
-        let peer = self.peer(account_mail, Selector::Email(peer_mail))?;
+        let peer = self.peer(account_mail, peer_mail)?;
 
         if let Some(ref cert) = peer.cert {
             if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, peer_mail, None) {
@@ -390,12 +373,12 @@ impl<T: SqlDriver> AutocryptStore<T> {
     pub fn setup_message(&self, account_mail: &str) -> Result<AutocryptSetupMessage> {
         let account = self.account(account_mail)?;
 
-        if let Some(ref password) = self.password {
-            let open = remove_password(account.cert, password)?;
-            Ok(AutocryptSetupMessage::new(open))
+        let cert = if let Some(ref password) = self.password {
+            remove_password(account.cert, password)?
         } else {
-            Ok(AutocryptSetupMessage::new(account.cert))
-        }
+            account.cert
+        };
+        Ok(AutocryptSetupMessage::new(cert))
     }
 
     /// Install a setup message into the system. If the key is usable we install the key.
@@ -419,24 +402,17 @@ impl<T: SqlDriver> AutocryptStore<T> {
             cert = set_password(cert, password)?
         }
 
-        let account = if let Ok(mut account) = self.account(account_mail) {
+        if let Ok(mut account) = self.account(account_mail) {
             // We don't check which cert is newer etc.
             // We expect the user to know what he/she is doing
             account.cert = cert;
-            account
+            self.conn.update_account(&account)?;
         } else {
-            Account::new(account_mail, cert)
+            let account = Account::new(account_mail, cert);
+            self.conn.set_account(&account)?;
         };
-        self.conn.update_account(&account)?;
-        self.update_peer_forceable(
-            account_mail,
-            account_mail,
-            &account.cert,
-            account.prefer,
-            now.into(),
-            false,
-            true,
-        )?;
+
+        self.conn.set_cert(account_mail, &cert)?;
         Ok(())
     }
 
@@ -461,15 +437,15 @@ impl<T: SqlDriver> AutocryptStore<T> {
         let account = self.account(account_mail)?;
         for rep in peers.iter() {
             let peer = if self.wildmode {
-                self.peer(None, Selector::Email(rep))?
+                self.peer(None, rep)?
             } else {
-                self.peer(Some(account_mail), Selector::Email(rep))?
+                self.peer(Some(account_mail), rep)?
             };
             fetched_peers.push(peer);
         }
 
         for peer in fetched_peers.iter() {
-            let key = peer.get_recipient(policy)?;
+            let key = peer.get_recipient(&self.conn, policy)?;
             recipient_subkeys.push(key);
         }
 
@@ -611,7 +587,7 @@ mod tests {
 
     use crate::peer::Peer;
     use crate::peer::Prefer;
-    use crate::rusqlite::SqliteDriver;
+    use crate::singleuser::SqliteDriver;
     use crate::store::SqlDriver;
     use crate::store::UIRecommendation;
 
@@ -687,16 +663,16 @@ mod tests {
         let policy = StandardPolicy::new();
 
         ctx.update_private_key(&policy, OUR).unwrap();
-        let acc = ctx.conn.get_account(OUR).unwrap();
+        let acc = ctx.conn.account(OUR).unwrap();
 
         // check stuff in acc
         ctx.update_private_key(&policy, OUR).unwrap();
-        let acc2 = ctx.conn.get_account(OUR).unwrap();
+        let acc2 = ctx.conn.account(OUR).unwrap();
 
         assert_eq!(acc, acc2);
 
         // check that PEER1 doesn't return anything
-        if let Ok(_) = ctx.conn.get_account(PEER1.into()) {
+        if let Ok(_) = ctx.conn.account(PEER1) {
             assert!(true, "PEER1 shouldn't be in the db!")
         }
 
@@ -709,13 +685,13 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
         gen_peer(&ctx, &account.mail, PEER2, Mode::Seen, Prefer::Mutual).unwrap();
 
-        let peer1 = ctx.conn.get_peer(Some(OUR), PEER1.into()).unwrap();
-        let peer2 = ctx.conn.get_peer(Some(OUR), PEER2.into()).unwrap();
+        let peer1 = ctx.conn.peer(Some(OUR), PEER1.into()).unwrap();
+        let peer2 = ctx.conn.peer(Some(OUR), PEER2.into()).unwrap();
 
         assert_eq!(peer1.mail, PEER1);
         assert_eq!(peer2.mail, PEER2);
@@ -729,7 +705,7 @@ mod tests {
 
         let ctx = test_db();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
@@ -737,7 +713,7 @@ mod tests {
 
         let peer1 = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
 
         let (cert, _) = gen_cert(PEER1, now.into()).unwrap();
@@ -754,7 +730,7 @@ mod tests {
 
         let updated = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
 
         assert_ne!(peer1, updated);
@@ -770,7 +746,7 @@ mod tests {
         .unwrap();
         let replaced = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
 
         assert_ne!(replaced, updated)
@@ -782,13 +758,13 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
         let old_peer = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
 
         let past = Utc::now() - Duration::days(150);
@@ -806,7 +782,7 @@ mod tests {
 
         let same_peer = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
         assert_eq!(old_peer, same_peer);
     }
@@ -817,7 +793,7 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         let now = SystemTime::now();
         let (cert, _) = gen_cert(PEER1, now).unwrap();
@@ -830,7 +806,7 @@ mod tests {
 
         let before = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
 
         let future = Utc::now();
@@ -839,7 +815,7 @@ mod tests {
 
         let peer = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
         assert_ne!(before.last_seen, peer.last_seen);
     }
@@ -850,12 +826,12 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
         let peer = ctx
             .conn
-            .get_peer(Some(&account.mail), PEER1.into())
+            .peer(Some(&account.mail), PEER1.into())
             .unwrap();
 
         let history = Utc::now() - Duration::days(150);
@@ -872,7 +848,7 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
@@ -885,7 +861,7 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
 
@@ -949,7 +925,7 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Seen, Prefer::Mutual).unwrap();
         assert_eq!(
@@ -964,7 +940,7 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         assert_eq!(
             ctx.recommend(Some(OUR), PEER1, &policy, false, Prefer::Mutual),
@@ -984,7 +960,7 @@ mod tests {
 
         let policy = StandardPolicy::new();
         ctx.update_private_key(&policy, OUR).unwrap();
-        let account = ctx.conn.get_account(OUR).unwrap();
+        let account = ctx.conn.account(OUR).unwrap();
 
         gen_peer(&ctx, &account.mail, PEER1, Mode::Gossip, Prefer::Mutual).unwrap();
 

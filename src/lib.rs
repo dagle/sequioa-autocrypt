@@ -16,7 +16,7 @@ pub mod uirecommendation;
 pub mod certd;
 
 #[cfg(feature = "rusqlite")]
-pub mod rusqlite;
+pub mod singleuser;
 
 pub type Result<T> = sequoia_openpgp::Result<T>;
 

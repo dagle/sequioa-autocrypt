@@ -1,10 +1,10 @@
 use crate::peer::Prefer;
-use sequoia_openpgp::Cert;
+use sequoia_openpgp::Fingerprint;
 
 #[derive(PartialEq, Debug)]
 pub struct Account {
     pub mail: String,
-    pub cert: Cert,
+    pub fpr: Fingerprint,
 
     // If we want to save settings into the database. For some applications
     // you might want configure this in your normal settings rather
@@ -14,10 +14,10 @@ pub struct Account {
 }
 
 impl Account {
-    pub(crate) fn new(mail: &str, cert: Cert) -> Self {
+    pub(crate) fn new(mail: &str, fpr: Fingerprint) -> Self {
         Account {
             mail: mail.to_owned(),
-            cert,
+            fpr,
             prefer: Prefer::Nopreference,
             enable: false,
         }
