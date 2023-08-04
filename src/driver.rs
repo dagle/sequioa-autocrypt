@@ -38,7 +38,7 @@ impl<'a> From<&'a KeyHandle> for Selector<'a> {
 pub trait SqlDriver {
     /// Get an account for an email,
     /// * `canonicalized_mail` canonicalized address for easier comparisons  
-    fn get_account(&self, canonicalized_mail: &str) -> Result<Account>;
+    fn account(&self, canonicalized_mail: &str) -> Result<Account>;
 
     fn insert_account(&self, account: &Account) -> Result<()>;
 
@@ -58,7 +58,7 @@ pub trait SqlDriver {
     ///
     /// * `account_mail` - An address specifying what the account the email peer should belong to.
     /// * `selector`- What we select on to find our peer
-    fn get_peer(&self, account_mail: &str, selector: Selector) -> Result<Peer>;
+    fn peer(&self, account_mail: &str, selector: Selector) -> Result<Peer>;
 
     fn delete_peer(&self, peer: Peer) -> Result<()>;
 
@@ -71,5 +71,5 @@ pub trait WildDriver {
     /// This makes it possible to share peers between accounts
     ///
     /// * `selector`- What we select on to find our peer
-    fn get_wild_peer(&self, selector: Selector) -> Result<Peer>;
+    fn wild_peer(&self, selector: Selector) -> Result<Peer>;
 }

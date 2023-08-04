@@ -135,7 +135,7 @@ impl<'a> Peer<'a> {
         UIRecommendation::Disable
     }
 
-    pub(crate) fn get_recipient(&'a self, policy: &'a dyn Policy) -> Result<Recipient> {
+    pub(crate) fn recipient(&'a self, policy: &'a dyn Policy) -> Result<Recipient> {
         encrypt_key!(self.cert, policy);
         encrypt_key!(self.gossip_cert, policy);
         Err(anyhow::anyhow!(

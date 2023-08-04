@@ -45,25 +45,6 @@ impl FromSql for Prefer {
     }
 }
 
-macro_rules! peer_fun {
-    ($self:ident, $account:expr, $selector:expr, $($param:expr),+) => {
-    {
-        let account_mail = $account;
-        let num = count!($($param)*) + 1;
-        let sqlstr = format!("{} WHERE {} and account = ?{};",
-            PEERGET, $selector, num);
-        let mut selectstmt = $self.conn.prepare(&sqlstr)?;
-
-        let mut rows = selectstmt.query(params![
-            $($param),*,
-            account_mail,
-        ])?;
-
-        Self::row_to_peer(&mut rows)
-    }
-    };
-}
-
 macro_rules! get_time {
     ($field:expr) => {{
         let unix: Option<i64> = $field?;
@@ -158,7 +139,7 @@ impl SqliteDriver {
 }
 
 impl SqlDriver for SqliteDriver {
-    fn get_account(&self, canonicalized_mail: &str) -> Result<Account> {
+    fn account(&self, canonicalized_mail: &str) -> Result<Account> {
         let mut selectstmt = self.conn.prepare(ACCOUNTGET)?;
 
         let mut rows = selectstmt.query(params![canonicalized_mail])?;
@@ -230,7 +211,7 @@ impl SqlDriver for SqliteDriver {
         Ok(())
     }
 
-    fn get_peer(&self, account_mail: &str, selector: Selector) -> Result<Peer> {
+    fn peer(&self, account_mail: &str, selector: Selector) -> Result<Peer> {
         match selector {
             Selector::Email(mail) => {
                 let num = count!(mail) + 1;
@@ -351,7 +332,7 @@ impl SqlDriver for SqliteDriver {
 }
 
 impl WildDriver for SqliteDriver {
-    fn get_wild_peer(&self, selector: Selector) -> Result<Peer> {
+    fn wild_peer(&self, selector: Selector) -> Result<Peer> {
         match selector {
             Selector::Email(mail) => {
                 let sqlstr = format!("{} WHERE {};", PEERGET, "address = ?1");

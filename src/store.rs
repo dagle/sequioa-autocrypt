@@ -38,27 +38,21 @@ use sequoia_autocrypt::{
     AutocryptHeader, AutocryptHeaderType, AutocryptSetupMessage, AutocryptSetupMessageParser,
 };
 
-pub struct Wild;
+pub enum Wild {}
 
-pub struct Strict;
+pub enum Strict {}
 
-pub struct AutocryptStore<T: SqlDriver, Mode> {
+pub trait Mode {}
+impl Mode for Wild {}
+impl Mode for Strict {}
+
+pub struct AutocryptStore<T: SqlDriver, M: Mode> {
     pub(crate) password: Option<Password>,
     pub(crate) conn: T,
-    mode: std::marker::PhantomData<Mode>,
+    mode: std::marker::PhantomData<M>,
 }
 
-// macro_rules! check_mode {
-//     ($self:ident, $account_mail:expr) => {
-//         if !$self.wildmode && $account_mail.is_none() {
-//             return Err(anyhow::anyhow!(
-//                 "You need to specify an account when the database isn't running in wildcard mode"
-//             ));
-//         }
-//     };
-// }
-//
-impl<T: SqlDriver, M> AutocryptStore<T, M> {
+impl<T: SqlDriver, M: Mode> AutocryptStore<T, M> {
     pub fn new(conn: T, password: Option<&str>) -> Result<AutocryptStore<T, M>> {
         Ok(AutocryptStore {
             password: password.map(Password::from),
@@ -67,7 +61,7 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
         })
     }
     fn account(&self, account_mail: &str) -> Result<Account> {
-        self.conn.get_account(account_mail)
+        self.conn.account(account_mail)
     }
 
     #[cfg(feature = "cert-d")]
@@ -79,14 +73,14 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
 
     /// Set the prefer setting for an account
     pub fn set_prefer(&self, account_mail: &str, prefer: Prefer) -> Result<()> {
-        let mut account = self.conn.get_account(account_mail)?;
+        let mut account = self.conn.account(account_mail)?;
         account.prefer = prefer;
         self.conn.insert_account(&account)
     }
 
     /// Get the prefer setting for an account
     pub fn prefer(&self, account_mail: &str) -> Result<Prefer> {
-        let account = self.conn.get_account(account_mail)?;
+        let account = self.conn.account(account_mail)?;
         Ok(account.prefer)
     }
 
@@ -95,14 +89,14 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
     /// Functions such as recommend does not check the enable and it's up
     /// the user to do so.
     pub fn set_enable(&self, account_mail: &str, enable: bool) -> Result<()> {
-        let mut account = self.conn.get_account(account_mail)?;
+        let mut account = self.conn.account(account_mail)?;
         account.enable = enable;
         self.conn.insert_account(&account)
     }
 
     /// Get enable for an account
     pub fn enable(&self, account_mail: &str) -> Result<bool> {
-        let account = self.conn.get_account(account_mail)?;
+        let account = self.conn.account(account_mail)?;
         Ok(account.enable)
     }
 
@@ -139,7 +133,7 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
         let now = SystemTime::now();
 
         // Check if we have a key, if that is the case, check if the key is ok.
-        let account = if let Ok(mut account) = self.conn.get_account(account_mail) {
+        let account = if let Ok(mut account) = self.conn.account(account_mail) {
             if account.cert.primary_key().with_policy(policy, now).is_ok() {
                 return Ok(());
             }
@@ -158,7 +152,7 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
 
         let peer = self
             .conn
-            .get_peer(account_mail, Selector::Email(account_mail))
+            .peer(account_mail, Selector::Email(account_mail))
             .ok();
 
         // We insert our own account into the peers, this is so we can send encrypted emails
@@ -294,7 +288,7 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
 
         let peer = self
             .conn
-            .get_peer(account_mail, Selector::Email(account_mail))
+            .peer(account_mail, Selector::Email(account_mail))
             .ok();
 
         self.update_peer_forceable(
@@ -307,48 +301,6 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
             false,
             true,
         )?;
-        Ok(())
-    }
-
-    fn gossip_helper(&self, peer: &Peer, policy: &dyn Policy) -> Result<AutocryptHeader> {
-        if let Some(ref cert) = peer.cert {
-            if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, &peer.mail, None) {
-                header.header_type = AutocryptHeaderType::Gossip;
-                return Ok(header);
-            }
-        }
-        if let Some(ref cert) = peer.gossip_cert {
-            if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, &peer.mail, None) {
-                header.header_type = AutocryptHeaderType::Gossip;
-                return Ok(header);
-            }
-        }
-        Err(anyhow::anyhow!("Can't find key to create gossip data"))
-    }
-
-    fn verify_helper(
-        &self,
-        helper: VHelper<T, M>,
-        policy: &dyn Policy,
-        input: &mut (dyn io::Read + Send + Sync),
-        sigstream: Option<&mut (dyn io::Read + Send + Sync)>,
-        output: Option<&mut (dyn io::Write + Send + Sync)>,
-    ) -> Result<()> {
-        let _helper = if let Some(dsig) = sigstream {
-            let mut v =
-                DetachedVerifierBuilder::from_reader(dsig)?.with_policy(policy, None, helper)?;
-            v.verify_reader(input)?;
-            v.into_helper()
-        } else {
-            let mut v = VerifierBuilder::from_reader(input)?.with_policy(policy, None, helper)?;
-            if let Some(output) = output {
-                io::copy(&mut v, output)?;
-                v.into_helper()
-            } else {
-                return Err(anyhow::anyhow!("None detach but no output stream"));
-            }
-        };
-
         Ok(())
     }
 
@@ -367,7 +319,7 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
         let mut recipient_subkeys: Vec<Recipient> = Vec::new();
 
         for peer in peers.iter() {
-            let key = peer.get_recipient(policy)?;
+            let key = peer.recipient(policy)?;
             recipient_subkeys.push(key);
         }
 
@@ -422,44 +374,41 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
 
         Ok(())
     }
+}
 
-    fn decrypt_helper(
-        &self,
-        helper: DHelper<T, M>,
-        policy: &dyn Policy,
-        input: &mut (dyn Read + Send + Sync),
-        output: &mut (dyn Write + Send + Sync),
-    ) -> Result<()> {
-        let mut decryptor = DecryptorBuilder::from_reader(input)?
-            .with_policy(policy, None, helper)
-            .context("Decryption failed")?;
-
-        io::copy(&mut decryptor, output)?;
-
-        // let helper = decryptor.into_helper();
-        // helper.result.set_signatures(&helper.helper.list);
-        Ok(())
-    }
-
-    fn recommend_helper(
-        &self,
-        peer: &Option<Peer>,
-        policy: &dyn Policy,
-        reply_to_encrypted: bool,
-        prefer: Prefer,
-    ) -> UIRecommendation {
-        if let Some(peer) = peer {
-            let pre = peer.preliminary_recommend(policy);
-            if pre.encryptable() && reply_to_encrypted {
-                return UIRecommendation::Encrypt;
-            }
-            if pre.preferable() && peer.prefer.encrypt() && prefer.encrypt() {
-                return UIRecommendation::Encrypt;
-            }
-            return pre;
+fn recommend_helper(
+    peer: &Option<Peer>,
+    policy: &dyn Policy,
+    reply_to_encrypted: bool,
+    prefer: Prefer,
+) -> UIRecommendation {
+    if let Some(peer) = peer {
+        let pre = peer.preliminary_recommend(policy);
+        if pre.encryptable() && reply_to_encrypted {
+            return UIRecommendation::Encrypt;
         }
-        UIRecommendation::Disable
+        if pre.preferable() && peer.prefer.encrypt() && prefer.encrypt() {
+            return UIRecommendation::Encrypt;
+        }
+        return pre;
     }
+    UIRecommendation::Disable
+}
+
+fn gossip_helper(peer: &Peer, policy: &dyn Policy) -> Result<AutocryptHeader> {
+    if let Some(ref cert) = peer.cert {
+        if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, &peer.mail, None) {
+            header.header_type = AutocryptHeaderType::Gossip;
+            return Ok(header);
+        }
+    }
+    if let Some(ref cert) = peer.gossip_cert {
+        if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, &peer.mail, None) {
+            header.header_type = AutocryptHeaderType::Gossip;
+            return Ok(header);
+        }
+    }
+    Err(anyhow::anyhow!("Can't find key to create gossip data"))
 }
 
 /// An autocrypt store, responsible for key storage.
@@ -470,19 +419,11 @@ impl<T: SqlDriver, M> AutocryptStore<T, M> {
 /// All arguments that accept on or more emails expect the emails to be canonicalized. If not
 /// canonicalized, comparisons might fail.
 impl<T: SqlDriver> AutocryptStore<T, Strict> {
-    // pub fn new(conn: T, password: Option<&str>) -> Result<Self> {
-    //     Ok(AutocryptStore {
-    //         password: password.map(Password::from),
-    //         conn,
-    //         mode: Default::default(),
-    //     })
-    // }
-
     fn peer<'a, S>(&self, account_mail: &str, selector: S) -> Result<Peer>
     where
         S: Into<Selector<'a>>,
     {
-        self.conn.get_peer(account_mail, selector.into())
+        self.conn.peer(account_mail, selector.into())
     }
 
     #[cfg(feature = "cert-d")]
@@ -561,7 +502,7 @@ impl<T: SqlDriver> AutocryptStore<T, Strict> {
         prefer: Prefer,
     ) -> UIRecommendation {
         let peer = self.peer(account_mail, Selector::Email(peer_mail)).ok();
-        self.recommend_helper(&peer, policy, reply_to_encrypted, prefer)
+        recommend_helper(&peer, policy, reply_to_encrypted, prefer)
     }
 
     /// multi_recommend runs recommend on multiple peers.
@@ -595,24 +536,10 @@ impl<T: SqlDriver> AutocryptStore<T, Strict> {
         policy: &dyn Policy,
     ) -> Result<AutocryptHeader> {
         let peer = self.peer(account_mail, Selector::Email(peer_mail))?;
-
-        if let Some(ref cert) = peer.cert {
-            if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, peer_mail, None) {
-                header.header_type = AutocryptHeaderType::Gossip;
-                return Ok(header);
-            }
-        }
-        if let Some(ref cert) = peer.gossip_cert {
-            if let Ok(mut header) = AutocryptHeader::new_sender(policy, cert, peer_mail, None) {
-                header.header_type = AutocryptHeaderType::Gossip;
-                return Ok(header);
-            }
-        }
-        Err(anyhow::anyhow!("Can't find key to create gossip data"))
+        gossip_helper(&peer, policy)
     }
 
-    /// Encrypt input. If we are in wildmode, we fetch peers from all accounts,
-    /// otherwise we are limited to the peers associated with the account
+    /// Encrypt input. Fetch peers the users account
     /// * `peers` - email address to the peers we want to send email to.
     pub fn encrypt(
         &self,
@@ -636,7 +563,7 @@ impl<T: SqlDriver> AutocryptStore<T, Strict> {
     }
 
     /// Decrypt input. This function will try to fetch peers needed to decrypt
-    /// and verify the input. If we are in wildmode, we fetch peers from all
+    /// and verify the input.
     /// accounts, otherwise we are limited to the peers associated with the account
     /// If we have a session key, we will try it first.
     pub fn decrypt<S>(
@@ -654,12 +581,19 @@ impl<T: SqlDriver> AutocryptStore<T, Strict> {
 
         let account_mail = Some(account_mail);
         let helper = DHelper::new(self, policy, account_mail, account.cert, sk.into());
-        self.decrypt_helper(helper, policy, input, output)
+        let mut decryptor = DecryptorBuilder::from_reader(input)?
+            .with_policy(policy, None, helper)
+            .context("Decryption failed")?;
+
+        io::copy(&mut decryptor, output)?;
+
+        // let helper = decryptor.into_helper();
+        // helper.result.set_signatures(&helper.helper.list);
+        Ok(())
     }
 
     /// Verify input. This function will try to fetch peers needed to verify
-    /// the input. If we are in wildmode, we fetch peers from all
-    /// accounts, otherwise we are limited to the peers associated with the account
+    /// the input from the account.
     /// Since autocrypt is mainly for encrypting/decrypting emails
     /// and decrypt checks signatures, this function is rarely used.
     pub fn verify(
@@ -671,24 +605,39 @@ impl<T: SqlDriver> AutocryptStore<T, Strict> {
         output: Option<&mut (dyn io::Write + Send + Sync)>,
     ) -> Result<()> {
         let helper = VHelper::new(self, Some(account_mail));
-        self.verify_helper(helper, policy, input, sigstream, output)
+
+        let _helper = if let Some(dsig) = sigstream {
+            let mut v =
+                DetachedVerifierBuilder::from_reader(dsig)?.with_policy(policy, None, helper)?;
+            v.verify_reader(input)?;
+            v.into_helper()
+        } else {
+            let mut v = VerifierBuilder::from_reader(input)?.with_policy(policy, None, helper)?;
+            if let Some(output) = output {
+                io::copy(&mut v, output)?;
+                v.into_helper()
+            } else {
+                return Err(anyhow::anyhow!("None detach but no output stream"));
+            }
+        };
+
+        Ok(())
     }
 }
 
+/// An autocrypt store, responsible for key storage in Wild mode
+///
+/// AutocryptStore stores your pgp keys and encrypts and decrypts data.
+/// AutocryptStore does not contain an sign function because it's not in the scope of autocrypt.
+///
+/// All arguments that accept on or more emails expect the emails to be canonicalized. If not
+/// canonicalized, comparisons might fail.
 impl<T: SqlDriver + WildDriver> AutocryptStore<T, Wild> {
-    // pub fn new(conn: T, password: Option<&str>) -> Result<Self> {
-    //     Ok(AutocryptStore {
-    //         password: password.map(Password::from),
-    //         conn,
-    //         mode: Default::default(),
-    //     })
-    // }
-
     fn peer<'a, S>(&self, selector: S) -> Result<Peer>
     where
         S: Into<Selector<'a>>,
     {
-        self.conn.get_wild_peer(selector.into())
+        self.conn.wild_peer(selector.into())
     }
 
     #[cfg(feature = "cert-d")]
@@ -737,7 +686,7 @@ impl<T: SqlDriver + WildDriver> AutocryptStore<T, Wild> {
         prefer: Prefer,
     ) -> UIRecommendation {
         let peer = self.peer(Selector::Email(peer_mail)).ok();
-        self.recommend_helper(&peer, policy, reply_to_encrypted, prefer)
+        recommend_helper(&peer, policy, reply_to_encrypted, prefer)
     }
 
     /// multi_recommend runs recommend on multiple peers.
@@ -763,12 +712,10 @@ impl<T: SqlDriver + WildDriver> AutocryptStore<T, Wild> {
     /// * `peer_mail` - peer we want to generate gossip for
     pub fn gossip_header(&self, peer_mail: &str, policy: &dyn Policy) -> Result<AutocryptHeader> {
         let peer = self.peer(Selector::Email(peer_mail))?;
-        self.gossip_helper(&peer, policy)
+        gossip_helper(&peer, policy)
     }
 
-    /// Encrypt input. If we are in wildmode, we fetch peers from all accounts,
-    /// otherwise we are limited to the peers associated with the account
-    /// * `peers` - email address to the peers we want to send email to.
+    /// Encrypt input. We fetch peers from all accounts
     pub fn encrypt(
         &self,
         policy: &dyn Policy,
@@ -809,12 +756,19 @@ impl<T: SqlDriver + WildDriver> AutocryptStore<T, Wild> {
 
         let account_mail = Some(account_mail);
         let helper = DHelper::new(self, policy, account_mail, account.cert, sk.into());
-        self.decrypt_helper(helper, policy, input, output)
+        let mut decryptor = DecryptorBuilder::from_reader(input)?
+            .with_policy(policy, None, helper)
+            .context("Decryption failed")?;
+
+        io::copy(&mut decryptor, output)?;
+
+        // let helper = decryptor.into_helper();
+        // helper.result.set_signatures(&helper.helper.list);
+        Ok(())
     }
 
     /// Verify input. This function will try to fetch peers needed to verify
-    /// the input. If we are in wildmode, we fetch peers from all
-    /// accounts, otherwise we are limited to the peers associated with the account
+    /// the input. We fetch peers from all accounts
     /// Since autocrypt is mainly for encrypting/decrypting emails
     /// and decrypt checks signatures, this function is rarely used.
     pub fn verify(
@@ -825,7 +779,22 @@ impl<T: SqlDriver + WildDriver> AutocryptStore<T, Wild> {
         output: Option<&mut (dyn io::Write + Send + Sync)>,
     ) -> Result<()> {
         let helper = VHelper::new(self, None);
-        self.verify_helper(helper, policy, input, sigstream, output)
+        let _helper = if let Some(dsig) = sigstream {
+            let mut v =
+                DetachedVerifierBuilder::from_reader(dsig)?.with_policy(policy, None, helper)?;
+            v.verify_reader(input)?;
+            v.into_helper()
+        } else {
+            let mut v = VerifierBuilder::from_reader(input)?.with_policy(policy, None, helper)?;
+            if let Some(output) = output {
+                io::copy(&mut v, output)?;
+                v.into_helper()
+            } else {
+                return Err(anyhow::anyhow!("None detach but no output stream"));
+            }
+        };
+
+        Ok(())
     }
 
     pub fn update_peer(

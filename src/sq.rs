@@ -1,6 +1,6 @@
 extern crate sequoia_openpgp as openpgp;
-use crate::driver::SqlDriver;
-use crate::store::{AutocryptStore, Strict};
+use crate::driver::{SqlDriver, WildDriver};
+use crate::store::{AutocryptStore, Mode, Strict, Wild};
 use crate::Result;
 use openpgp::crypto::{Decryptor, Password};
 use openpgp::fmt::hex;
@@ -133,29 +133,24 @@ where
     }
 }
 
-pub struct VHelper<'a, T: SqlDriver, Mode> {
-    ctx: &'a AutocryptStore<T, Mode>,
+pub struct VHelper<'a, T: SqlDriver, M: Mode> {
+    ctx: &'a AutocryptStore<T, M>,
     account_email: Option<&'a str>,
 }
 
-impl<'a, T: SqlDriver, Mode> VHelper<'a, T, Mode> {
-    pub fn new(ctx: &'a AutocryptStore<T, Mode>, account_email: Option<&'a str>) -> Self {
+impl<'a, T: SqlDriver, M: Mode> VHelper<'a, T, M> {
+    pub fn new(ctx: &'a AutocryptStore<T, M>, account_email: Option<&'a str>) -> Self {
         VHelper { ctx, account_email }
     }
 }
 
-impl<'a, T: SqlDriver, Mode> VerificationHelper for VHelper<'a, T, Mode> {
+impl<'a, T: SqlDriver + WildDriver> VerificationHelper for VHelper<'a, T, Wild> {
     /// Get keys from the db, we get both keys and gossip_keys
     /// matching the fingerprint and keyid
     fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
         let mut certs = Vec::new();
         for id in _ids {
-            // TODO: no unwrap
-            if let Ok(peer) = self
-                .ctx
-                .conn
-                .get_peer(self.account_email.unwrap(), id.into())
-            {
+            if let Ok(peer) = self.ctx.conn.wild_peer(id.into()) {
                 if let Some(c) = peer.cert {
                     certs.push(c.into_owned())
                 }
@@ -173,18 +168,42 @@ impl<'a, T: SqlDriver, Mode> VerificationHelper for VHelper<'a, T, Mode> {
     }
 }
 
-pub struct DHelper<'a, T: SqlDriver, Mode> {
-    ctx: &'a AutocryptStore<T, Mode>,
+impl<'a, T: SqlDriver> VerificationHelper for VHelper<'a, T, Strict> {
+    /// Get keys from the db, we get both keys and gossip_keys
+    /// matching the fingerprint and keyid
+    fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
+        let mut certs = Vec::new();
+        for id in _ids {
+            if let Ok(peer) = self.ctx.conn.peer(self.account_email.unwrap(), id.into()) {
+                if let Some(c) = peer.cert {
+                    certs.push(c.into_owned())
+                }
+                if let Some(c) = peer.gossip_cert {
+                    certs.push(c.into_owned())
+                }
+            }
+        }
+        Ok(certs)
+    }
+
+    fn check(&mut self, _structure: MessageStructure) -> Result<()> {
+        // TODO: Save the result
+        Ok(())
+    }
+}
+
+pub struct DHelper<'a, T: SqlDriver, M: Mode> {
+    ctx: &'a AutocryptStore<T, M>,
     sk: Option<SessionKey>,
     keys: HashMap<KeyID, PrivateKey>,
     fp: Fingerprint,
 
-    helper: VHelper<'a, T, Mode>,
+    helper: VHelper<'a, T, M>,
 }
 
-impl<'a, T: SqlDriver, Mode> DHelper<'a, T, Mode> {
+impl<'a, T: SqlDriver, M: Mode> DHelper<'a, T, M> {
     pub fn new(
-        ctx: &'a AutocryptStore<T, Mode>,
+        ctx: &'a AutocryptStore<T, M>,
         policy: &dyn Policy,
         account_mail: Option<&'a str>,
         cert: Cert,
@@ -212,7 +231,7 @@ impl<'a, T: SqlDriver, Mode> DHelper<'a, T, Mode> {
         }
     }
 }
-impl<'a, T: SqlDriver, Mode> VerificationHelper for DHelper<'a, T, Mode> {
+impl<'a, T: SqlDriver + WildDriver> VerificationHelper for DHelper<'a, T, Wild> {
     fn get_certs(&mut self, ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
         // TODO: Being able to turn off verification
 
@@ -224,7 +243,19 @@ impl<'a, T: SqlDriver, Mode> VerificationHelper for DHelper<'a, T, Mode> {
     }
 }
 
-impl<'a, T: SqlDriver, Mode> DHelper<'a, T, Mode> {
+impl<'a, T: SqlDriver> VerificationHelper for DHelper<'a, T, Strict> {
+    fn get_certs(&mut self, ids: &[openpgp::KeyHandle]) -> Result<Vec<Cert>> {
+        // TODO: Being able to turn off verification
+
+        self.helper.get_certs(ids)
+    }
+    fn check(&mut self, _structure: MessageStructure) -> Result<()> {
+        // TODO: Save the result
+        Ok(())
+    }
+}
+
+impl<'a, T: SqlDriver, M: Mode> DHelper<'a, T, M> {
     fn try_decrypt<D>(
         &self,
         pkesk: &PKESK,
@@ -252,7 +283,7 @@ impl<'a, T: SqlDriver, Mode> DHelper<'a, T, Mode> {
     }
 }
 
-impl<'a, T: SqlDriver, Mode> DecryptionHelper for DHelper<'a, T, Mode> {
+impl<'a, T: SqlDriver, M: Mode> DecryptionHelper for DHelper<'a, T, M> {
     // We don't use the skesks because we know that the key should be
     // a pkesk with autoencrypt, since it only allows those kind of encryptions.
     fn decrypt<D>(

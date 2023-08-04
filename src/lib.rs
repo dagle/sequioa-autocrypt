@@ -13,8 +13,6 @@ pub mod sq;
 pub mod store;
 pub mod uirecommendation;
 
-pub mod certd;
-
 #[cfg(feature = "rusqlite")]
 pub mod rusqlite;
 
