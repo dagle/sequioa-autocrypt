@@ -10,7 +10,7 @@ chrono = "0.4.23"
 idna = "0.3.0"
 sequoia-autocrypt = "0.25.0"
 sequoia-openpgp = "1.13.0"
-rusqlite = { version = "0.28.0", features = ["chrono"], optional = true }
+rusqlite = { version = "0.29.0", features = ["chrono"], optional = true }
 dirs = "5.0.0"
 
 [features]

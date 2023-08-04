@@ -12,7 +12,7 @@ use sequoia_openpgp::Cert;
 
 pub mod sql;
 
-use crate::driver::{Selector, SqlDriver};
+use crate::driver::{Selector, SqlDriver, WildDriver};
 use crate::{
     account::Account,
     peer::{Peer, Prefer},
@@ -48,26 +48,18 @@ impl FromSql for Prefer {
 macro_rules! peer_fun {
     ($self:ident, $account:expr, $selector:expr, $($param:expr),+) => {
     {
-        if let Some(account_mail) = $account {
-            let num = count!($($param)*) + 1;
-            let sqlstr = format!("{} WHERE {} and account = ?{};",
-                PEERGET, $selector, num);
-            let mut selectstmt = $self.conn.prepare(&sqlstr)?;
+        let account_mail = $account;
+        let num = count!($($param)*) + 1;
+        let sqlstr = format!("{} WHERE {} and account = ?{};",
+            PEERGET, $selector, num);
+        let mut selectstmt = $self.conn.prepare(&sqlstr)?;
 
-            let mut rows = selectstmt.query(params![
-                $($param),*,
-                account_mail,
-            ])?;
+        let mut rows = selectstmt.query(params![
+            $($param),*,
+            account_mail,
+        ])?;
 
-            Self::row_to_peer(&mut rows)
-        } else {
-            let sqlstr = format!("{} WHERE {};", PEERGET, $selector);
-            let mut selectstmt = $self.conn.prepare(&sqlstr)?;
-            let mut rows = selectstmt.query(params![
-                $($param),*
-            ])?;
-            Self::row_to_peer(&mut rows)
-        }
+        Self::row_to_peer(&mut rows)
     }
     };
 }
@@ -92,10 +84,10 @@ pub struct SqliteDriver {
 }
 
 pub fn cert_d_path() -> Option<PathBuf> {
-   let mut data_dir = dirs::data_dir()?;
-   data_dir.push("/pgp.cert.d");
-   data_dir.push("/_autocrypt.sqlite");
-   Some(data_dir)
+    let mut data_dir = dirs::data_dir()?;
+    data_dir.push("/pgp.cert.d");
+    data_dir.push("/_autocrypt.sqlite");
+    Some(data_dir)
 }
 
 impl SqliteDriver {
@@ -238,36 +230,46 @@ impl SqlDriver for SqliteDriver {
         Ok(())
     }
 
-    fn get_peer(&self, account_mail: Option<&str>, selector: Selector) -> Result<Peer> {
+    fn get_peer(&self, account_mail: &str, selector: Selector) -> Result<Peer> {
         match selector {
-            Selector::Email(mail) => peer_fun!(self, account_mail, "address = ?1", mail),
-            Selector::Fpr(fpr) => peer_fun!(
-                self,
-                account_mail,
-                "(key_fpr = ?1 or gossip_key_fpr = ?1)",
-                fpr.to_hex()
-            ),
-            Selector::KeyID(key_id) => peer_fun!(
-                self,
-                account_mail,
-                "(key_keyid = ?1 or gossip_key_keiid = ?1)",
-                key_id.to_hex()
-            ),
+            Selector::Email(mail) => {
+                let num = count!(mail) + 1;
+                let sqlstr = format!(
+                    "{} WHERE {} and account = ?{};",
+                    PEERGET, "address = ?1", num
+                );
+                let mut selectstmt = self.conn.prepare(&sqlstr)?;
+                let mut rows = selectstmt.query(params![mail, account_mail])?;
+                Self::row_to_peer(&mut rows)
+            }
+            Selector::Fpr(fpr) => {
+                let num = count!(fpr.to_hex()) + 1;
+                let sqlstr = format!(
+                    "{} WHERE {} and account = ?{};",
+                    PEERGET, "(key_fpr = ?1 or gossip_key_fpr = ?1)", num
+                );
+                let mut selectstmt = self.conn.prepare(&sqlstr)?;
+                let mut rows = selectstmt.query(params![(fpr.to_hex()), account_mail])?;
+                Self::row_to_peer(&mut rows)
+            }
+            Selector::KeyID(key_id) => {
+                let num = count!(key_id.to_hex()) + 1;
+                let sqlstr = format!(
+                    "{} WHERE {} and account = ?{};",
+                    PEERGET, "(key_keyid = ?1 or gossip_key_keiid = ?1)", num
+                );
+                let mut selectstmt = self.conn.prepare(&sqlstr)?;
+                let mut rows = selectstmt.query(params![(key_id.to_hex()), account_mail])?;
+                Self::row_to_peer(&mut rows)
+            }
         }
     }
 
-    fn delete_peer(&self, account_mail: Option<&str>, canonicalized_mail: &str) -> Result<()> {
-        if let Some(account_mail) = account_mail {
-            let accountdelete = "DELETE FROM autocrypt_peer
-                WHERE account = ? and address = ?;";
-            self.conn
-                .execute(accountdelete, params![account_mail, canonicalized_mail])?;
-        } else {
-            let accountdelete = "DELETE FROM autocrypt_peer
-                WHERE address = ?;";
-            self.conn
-                .execute(accountdelete, params![canonicalized_mail])?;
-        }
+    fn delete_peer(&self, peer: Peer) -> Result<()> {
+        let accountdelete = "DELETE FROM autocrypt_peer
+            WHERE account = ? and address = ?;";
+        self.conn
+            .execute(accountdelete, params![peer.account, peer.mail])?;
         Ok(())
     }
 
@@ -308,7 +310,7 @@ impl SqlDriver for SqliteDriver {
         Ok(())
     }
 
-    fn update_peer(&self, peer: &Peer, wildmode: bool) -> Result<()> {
+    fn update_peer(&self, peer: &Peer) -> Result<()> {
         let keystr = if let Some(ref key) = peer.cert {
             Some(String::from_utf8(key.armored().to_vec()?)?)
         } else {
@@ -325,12 +327,7 @@ impl SqlDriver for SqliteDriver {
         let gossip_keystr_fpr = peer.gossip_cert.as_ref().map(|c| c.fingerprint().to_hex());
         let gossip_keystr_id = peer.cert.as_ref().map(|c| c.keyid().to_hex());
 
-        // can we do this better?
-        let insertstmt = if wildmode {
-            format!("{} WHERE address = ?12;", PEERUPDATE)
-        } else {
-            format!("{} WHERE address = ?12 and account = ?11;", PEERUPDATE)
-        };
+        let insertstmt = format!("{} WHERE address = ?12 and account = ?11;", PEERUPDATE);
 
         self.conn.execute(
             &insertstmt,
@@ -350,5 +347,36 @@ impl SqlDriver for SqliteDriver {
             ],
         )?;
         Ok(())
+    }
+}
+
+impl WildDriver for SqliteDriver {
+    fn get_wild_peer(&self, selector: Selector) -> Result<Peer> {
+        match selector {
+            Selector::Email(mail) => {
+                let sqlstr = format!("{} WHERE {};", PEERGET, "address = ?1");
+                let mut selectstmt = self.conn.prepare(&sqlstr)?;
+                let mut rows = selectstmt.query(params![mail])?;
+                Self::row_to_peer(&mut rows)
+            }
+            Selector::Fpr(fpr) => {
+                let sqlstr = format!(
+                    "{} WHERE {};",
+                    PEERGET, "(key_fpr = ?1 or gossip_key_fpr = ?1)"
+                );
+                let mut selectstmt = self.conn.prepare(&sqlstr)?;
+                let mut rows = selectstmt.query(params![fpr.to_hex()])?;
+                Self::row_to_peer(&mut rows)
+            }
+            Selector::KeyID(keyid) => {
+                let sqlstr = format!(
+                    "{} WHERE {};",
+                    PEERGET, "(key_keyid = ?1 or gossip_key_keiid = ?1)"
+                );
+                let mut selectstmt = self.conn.prepare(&sqlstr)?;
+                let mut rows = selectstmt.query(params![keyid.to_hex()])?;
+                Self::row_to_peer(&mut rows)
+            }
+        }
     }
 }
